@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我的私房地圖工具 (階段一)</title>
+    <!-- 引入 Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+        /* 側邊清單樣式 */
+        #sidebar {
+            width: 350px;
+            background: #f8f9fa;
+            border-right: 1px solid #dee2e6;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            z-index: 1000;
+        }
+        #sidebar h2 {
+            font-size: 1.25rem;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        #sidebar p {
+            font-size: 0.85rem;
+            color: #6c75d7;
+            margin-bottom: 15px;
+        }
+        #place-list {
+            flex: 1;
+            overflow-y: auto;
+            list-style: none;
+        }
+        .place-item {
+            background: white;
+            padding: 12px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .place-item:hover {
+            background: #e9ecef;
+            transform: translateY(-2px);
+        }
+        .place-item h3 {
+            font-size: 1rem;
+            color: #2c3e50;
+            margin-bottom: 4px;
+        }
+        .place-item p {
+            font-size: 0.8rem;
+            color: #555;
+            margin: 0;
+        }
+        /* 地圖容器樣式 */
+        #map {
+            flex: 1;
+            height: 100%;
+        }
+        /* 彈出視窗表單樣式 */
+        .popup-form input, .popup-form textarea {
+            width: 100%;
+            padding: 8px;
+            margin-top: 5px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        .popup-form button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .popup-form button:hover {
+            background: #0056b3;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 側邊欄：景點清單 -->
+    <div id="sidebar">
+        <h2>🗺️ 我的私房景點</h2>
+        <p>提示：在地圖任意空白處點擊即可新增標記與筆記！</p>
+        <ul id="place-list">
+            <!-- 動態插入清單 -->
+        </ul>
+    </div>
+
+    <!-- 地圖主畫面 -->
+    <div id="map"></div>
+
+    <!-- 引入 Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // 1. 初始化地圖 (以台北市為預設中心點)
+        const map = L.map('map').setView([25.0330, 121.5654], 13);
+
+        // 2. 載入 OpenStreetMap 圖資
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        // 3. 從 LocalStorage 讀取已儲存的地點資料，若無則為空陣列
+        let places = JSON.parse(localStorage.getItem('my_private_places')) || [];
+        let markersLayer = L.layerGroup().addTo(map);
+
+        // 渲染地圖標記與側邊清單
+        function renderPlaces() {
+            markersLayer.clearLayers();
+            const listContainer = document.getElementById('place-list');
+            listContainer.innerHTML = '';
+
+            places.forEach((place, index) => {
+                // 建立地圖標記
+                const marker = L.marker([place.lat, place.lng]).addTo(markersLayer);
+                marker.bindPopup(`<b>${place.name}</b><br>${place.note || '無筆記'}`);
+
+                // 建立側邊欄清單項目
+                const li = document.createElement('li');
+                li.className = 'place-item';
+                li.innerHTML = `<h3>📍 ${place.name}</h3><p>${place.note || '點擊查看詳情'}</p>`;
+                
+                // 點擊清單項目時，地圖飛向該點並彈出 Popup
+                li.addEventListener('click', () => {
+                    map.flyTo([place.lat, place.lng], 16);
+                    marker.openPopup();
+                });
+
+                listContainer.appendChild(li);
+            });
+        }
+
+        // 初始化渲染
+        renderPlaces();
+
+        // 4. 監聽地圖點擊事件，動態新增標記
+        map.on('click', function(e) {
+            const lat = e.latlng.lat;
+            const lng = e.latlng.lng;
+
+            // 建立彈出表單
+            const popupContent = `
+                <div class="popup-form">
+                    <h3>新增私房景點</h3>
+                    <label>地點名稱：</label>
+                    <input type="text" id="new-name" placeholder="例如：巷弄咖啡廳">
+                    <label>個人筆記：</label>
+                    <textarea id="new-note" placeholder="例如：拿鐵很好喝，適合辦公"></textarea>
+                    <button onclick="savePlace(${lat}, ${lng})">儲存地點</button>
+                </div>
+            `;
+
+            L.popup()
+                .setLatLng([lat, lng])
+                .setContent(popupContent)
+                .openOn(map);
+        });
+
+        // 儲存地點的全局函數
+        window.savePlace = function(lat, lng) {
+            const name = document.getElementById('new-name').value.trim();
+            const note = document.getElementById('new-note').value.trim();
+
+            if (!name) {
+                alert('請輸入地點名稱！');
+                return;
+            }
+
+            // 新增至陣列
+            places.push({ name, note, lat, lng });
+
+            // 存入 LocalStorage
+            localStorage.setItem('my_private_places', JSON.stringify(places));
+
+            // 關閉彈出視窗並重新渲染
+            map.closePopup();
+            renderPlaces();
+        };
+    </script>
+</body>
+</html>
