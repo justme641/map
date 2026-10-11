@@ -180,6 +180,8 @@ const Store = {
   }
 };
 
+Store.load();   // 必須最先載入，後面的模組初始化都會用到 Store.state
+
 /* ---------------- Categories ---------------- */
 const Cats = {
   get(id) { const l = Store.state.categories; return l.find(c => c.id === id) || l.find(c => c.id === 'other'); },
@@ -313,7 +315,7 @@ function buildForm(o) {
     e.preventDefault();
     const lat = parseFloat(f.lat.value), lng = parseFloat(f.lng.value);
     if (!(lat >= -90 && lat <= 90) || !(lng >= -180 && lng <= 180)) return toast('座標格式不正確（緯度 -90~90、經度 -180~180）');
-    o.onSubmit({ name: f.name.value.trim() || '未命名', catId: f.cat.value, rating: +f.rating.value, note: f.note.value.trim(), lat, lng });
+    o.onSubmit({ name: f.elements.name.value.trim() || '未命名', catId: f.cat.value, rating: +f.rating.value, note: f.note.value.trim(), lat, lng });
   });
   return f;
 }
@@ -324,7 +326,7 @@ const Form = {
   open(title, form) {
     $('#dlgTitle').textContent = title;
     const b = $('#dlgBody'); b.innerHTML = ''; b.appendChild(form);
-    this.dlg.showModal(); setTimeout(() => form.name.focus(), 50);
+    this.dlg.showModal(); setTimeout(() => form.elements.name.focus(), 50);
   },
   close() { if (this.dlg.open) this.dlg.close(); },
   openNew(ll) {
@@ -363,8 +365,9 @@ const UI = {
     const pane = document.createElement('div'); pane.className = 'pane'; pane.id = 'pane-' + t.id;
     $('#tabs').appendChild(btn); $('#panes').appendChild(pane);
     btn.onclick = () => this.show(t.id);
-    this.tabs.push({ ...t, btn, pane });
-    t.init(pane);
+    const tab = { ...t, btn, pane };
+    this.tabs.push(tab);
+    t.init.call(tab, pane);          // init 內設定的 refresh 要掛在 tab 上
     if (this.tabs.length === 1) this.show(t.id);
   },
   show(id) {
@@ -485,22 +488,25 @@ UI.addTab({
 });
 
 /* ---------------- 右上角按鈕 ---------------- */
+const DEFAULT_ZOOM = 15;
 let meMarker = null;
-$('#btnLocate').onclick = async () => {
+async function locateMe(auto) {
   try {
     const p = await App.getLocation();
     if (meMarker) map.removeLayer(meMarker);
     meMarker = L.circleMarker([p.lat, p.lng], { radius: 8, color: '#fff', weight: 3, fillColor: '#2563eb', fillOpacity: 1 }).addTo(map);
-    map.flyTo([p.lat, p.lng], Math.max(map.getZoom(), 16));
-  } catch (e) { toast(e.message); }
-};
+    if (auto) map.setView([p.lat, p.lng], DEFAULT_ZOOM);
+    else map.flyTo([p.lat, p.lng], DEFAULT_ZOOM);
+  } catch (e) { toast(auto ? '無法自動定位，已顯示上次位置' : e.message); }
+}
+$('#btnLocate').onclick = () => locateMe(false);
 $('#btnSide').onclick = () => { document.body.classList.toggle('side-closed'); setTimeout(() => map.invalidateSize(), 50); };
 addEventListener('resize', () => map.invalidateSize());
 
 /* ---------------- 啟動 ---------------- */
-Store.load();
 Markers.render();
 UI.refresh();
+locateMe(true);   // 開啟時自動定位到目前所在區域（縮放 15）；失敗則沿用上次位置
 </script>
 </body>
 </html>
