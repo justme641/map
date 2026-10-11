@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>我的私房地圖工具 (階段一)</title>
+    <title>我的私房地圖工具 (含座標輸入)</title>
     <!-- 引入 Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
@@ -27,6 +27,7 @@
             flex-direction: column;
             padding: 20px;
             z-index: 1000;
+            overflow-y: auto;
         }
         #sidebar h2 {
             font-size: 1.25rem;
@@ -35,12 +36,45 @@
         }
         #sidebar p {
             font-size: 0.85rem;
-            color: #6c75d7;
+            color: #6c757d;
             margin-bottom: 15px;
         }
+        /* 座標輸入表單區塊樣式 */
+        .coord-form-box {
+            background: white;
+            padding: 12px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .coord-form-box h3 {
+            font-size: 0.95rem;
+            margin-bottom: 8px;
+            color: #2c3e50;
+        }
+        .coord-form-box input {
+            width: 100%;
+            padding: 6px 8px;
+            margin-bottom: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+        .coord-form-box button {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            width: 100%;
+            font-weight: bold;
+        }
+        .coord-form-box button:hover {
+            background: #218838;
+        }
+        
         #place-list {
-            flex: 1;
-            overflow-y: auto;
             list-style: none;
         }
         .place-item {
@@ -95,10 +129,22 @@
 </head>
 <body>
 
-    <!-- 側邊欄：景點清單 -->
+    <!-- 側邊欄 -->
     <div id="sidebar">
         <h2>🗺️ 我的私房景點</h2>
-        <p>提示：在地圖任意空白處點擊即可新增標記與筆記！</p>
+        <p>提示：在地圖任意空白處點擊，或下方直接輸入座標新增！</p>
+
+        <!-- 新增：手動輸入座標表單 -->
+        <div class="coord-form-box">
+            <h3>📌 輸入座標新增標記</h3>
+            <input type="text" id="input-lat" placeholder="緯度 (例: 25.0330)">
+            <input type="text" id="input-lng" placeholder="經度 (例: 121.5654)">
+            <input type="text" id="input-name" placeholder="地點名稱">
+            <input type="text" id="input-note" placeholder="個人筆記 (選填)">
+            <button onclick="addMarkerByCoords()">新增至地圖</button>
+        </div>
+
+        <h3>📋 清單列表</h3>
         <ul id="place-list">
             <!-- 動態插入清單 -->
         </ul>
@@ -119,7 +165,7 @@
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(map);
 
-        // 3. 從 LocalStorage 讀取已儲存的地點資料，若無則為空陣列
+        // 3. 從 LocalStorage 讀取已儲存的地點資料
         let places = JSON.parse(localStorage.getItem('my_private_places')) || [];
         let markersLayer = L.layerGroup().addTo(map);
 
@@ -129,7 +175,7 @@
             const listContainer = document.getElementById('place-list');
             listContainer.innerHTML = '';
 
-            places.forEach((place, index) => {
+            places.forEach((place) => {
                 // 建立地圖標記
                 const marker = L.marker([place.lat, place.lng]).addTo(markersLayer);
                 marker.bindPopup(`<b>${place.name}</b><br>${place.note || '無筆記'}`);
@@ -157,14 +203,13 @@
             const lat = e.latlng.lat;
             const lng = e.latlng.lng;
 
-            // 建立彈出表單
             const popupContent = `
                 <div class="popup-form">
                     <h3>新增私房景點</h3>
                     <label>地點名稱：</label>
                     <input type="text" id="new-name" placeholder="例如：巷弄咖啡廳">
                     <label>個人筆記：</label>
-                    <textarea id="new-note" placeholder="例如：拿鐵很好喝，適合辦公"></textarea>
+                    <textarea id="new-note" placeholder="例如：拿鐵很好喝"></textarea>
                     <button onclick="savePlace(${lat}, ${lng})">儲存地點</button>
                 </div>
             `;
@@ -175,7 +220,7 @@
                 .openOn(map);
         });
 
-        // 儲存地點的全局函數
+        // 透過地圖點擊彈窗儲存的函數
         window.savePlace = function(lat, lng) {
             const name = document.getElementById('new-name').value.trim();
             const note = document.getElementById('new-note').value.trim();
@@ -185,15 +230,42 @@
                 return;
             }
 
-            // 新增至陣列
             places.push({ name, note, lat, lng });
-
-            // 存入 LocalStorage
             localStorage.setItem('my_private_places', JSON.stringify(places));
 
-            // 關閉彈出視窗並重新渲染
             map.closePopup();
             renderPlaces();
+        };
+
+        // 5. 新增：透過手動輸入座標按鈕觸發的函數
+        window.addMarkerByCoords = function() {
+            const lat = parseFloat(document.getElementById('input-lat').value);
+            const lng = parseFloat(document.getElementById('input-lng').value);
+            const name = document.getElementById('input-name').value.trim();
+            const note = document.getElementById('input-note').value.trim();
+
+            if (isNaN(lat) || isNaN(lng)) {
+                alert('請輸入有效的緯度與經度數字！');
+                return;
+            }
+            if (!name) {
+                alert('請輸入地點名稱！');
+                return;
+            }
+
+            // 加入陣列並存入 LocalStorage
+            places.push({ name, note, lat, lng });
+            localStorage.setItem('my_private_places', JSON.stringify(places));
+
+            // 重新渲染並移動地圖焦點
+            renderPlaces();
+            map.flyTo([lat, lng], 16);
+
+            // 清空輸入框
+            document.getElementById('input-lat').value = '';
+            document.getElementById('input-lng').value = '';
+            document.getElementById('input-name').value = '';
+            document.getElementById('input-note').value = '';
         };
     </script>
 </body>
