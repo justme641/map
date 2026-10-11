@@ -1,272 +1,506 @@
-<!DOCTYPE html>
-<html lang="zh-TW">
+<!doctype html>
+<html lang="zh-Hant">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>我的私房地圖工具 (含座標輸入)</title>
-    <!-- 引入 Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            display: flex;
-            height: 100vh;
-            overflow: hidden;
-        }
-        /* 側邊清單樣式 */
-        #sidebar {
-            width: 350px;
-            background: #f8f9fa;
-            border-right: 1px solid #dee2e6;
-            display: flex;
-            flex-direction: column;
-            padding: 20px;
-            z-index: 1000;
-            overflow-y: auto;
-        }
-        #sidebar h2 {
-            font-size: 1.25rem;
-            margin-bottom: 10px;
-            color: #333;
-        }
-        #sidebar p {
-            font-size: 0.85rem;
-            color: #6c757d;
-            margin-bottom: 15px;
-        }
-        /* 座標輸入表單區塊樣式 */
-        .coord-form-box {
-            background: white;
-            padding: 12px;
-            border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-        .coord-form-box h3 {
-            font-size: 0.95rem;
-            margin-bottom: 8px;
-            color: #2c3e50;
-        }
-        .coord-form-box input {
-            width: 100%;
-            padding: 6px 8px;
-            margin-bottom: 8px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            font-size: 0.85rem;
-        }
-        .coord-form-box button {
-            background: #28a745;
-            color: white;
-            border: none;
-            padding: 6px 12px;
-            border-radius: 4px;
-            cursor: pointer;
-            width: 100%;
-            font-weight: bold;
-        }
-        .coord-form-box button:hover {
-            background: #218838;
-        }
-        
-        #place-list {
-            list-style: none;
-        }
-        .place-item {
-            background: white;
-            padding: 12px;
-            margin-bottom: 10px;
-            border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .place-item:hover {
-            background: #e9ecef;
-            transform: translateY(-2px);
-        }
-        .place-item h3 {
-            font-size: 1rem;
-            color: #2c3e50;
-            margin-bottom: 4px;
-        }
-        .place-item p {
-            font-size: 0.8rem;
-            color: #555;
-            margin: 0;
-        }
-        /* 地圖容器樣式 */
-        #map {
-            flex: 1;
-            height: 100%;
-        }
-        /* 彈出視窗表單樣式 */
-        .popup-form input, .popup-form textarea {
-            width: 100%;
-            padding: 8px;
-            margin-top: 5px;
-            margin-bottom: 10px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-        }
-        .popup-form button {
-            background: #007bff;
-            color: white;
-            border: none;
-            padding: 6px 12px;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-        .popup-form button:hover {
-            background: #0056b3;
-        }
-    </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>我的地圖</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+:root{--bg:#fff;--fg:#1f2430;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb;--danger:#dc2626;--panel:#f8fafc}
+@media (prefers-color-scheme:dark){:root{--bg:#161a22;--fg:#e8eaf0;--muted:#9aa3b2;--line:#2b3140;--accent:#60a5fa;--danger:#f87171;--panel:#1d222c}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif;color:var(--fg);background:var(--bg)}
+#app{display:flex;height:100%}
+#map{flex:1;min-width:0;height:100%}
+#sidebar{width:340px;display:flex;flex-direction:column;border-right:1px solid var(--line);background:var(--bg);order:-1}
+body.side-closed #sidebar{display:none}
+#tabs{display:flex;border-bottom:1px solid var(--line);background:var(--panel)}
+#tabs button{flex:1;border:0;background:none;padding:10px 4px;color:var(--muted);cursor:pointer;font:inherit;border-bottom:2px solid transparent}
+#tabs button.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+#panes{flex:1;overflow:auto;padding:12px}
+.pane{display:none}.pane.on{display:block}
+input,select,textarea,button{font:inherit;color:inherit}
+input,select,textarea{width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+button{padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.danger{color:var(--danger)}
+label{display:block;margin-bottom:8px;font-size:12px;color:var(--muted)}
+label>input,label>select,label>textarea{margin-top:3px;font-size:14px;color:var(--fg)}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.muted{color:var(--muted);font-size:12px}
+.items{list-style:none;margin:8px 0;padding:0}
+.items li{display:flex;gap:10px;padding:9px 8px;border-bottom:1px solid var(--line);cursor:pointer;border-radius:8px}
+.items li:hover{background:var(--panel)}
+.items .ic{font-size:20px;line-height:1.2}
+.items .t{font-weight:600}
+.filters{display:grid;grid-template-columns:1fr 130px;gap:8px}
+.catrow{display:grid;grid-template-columns:52px 1fr 40px 32px;gap:6px;margin-bottom:6px;align-items:center}
+.catrow input[type=color]{padding:0;height:34px}
+.pin{background:none;border:0}
+.pin-body{width:30px;height:30px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4)}
+.pin-body span{transform:rotate(45deg);font-size:15px}
+.pp{min-width:190px}.pp h3{margin:0 0 4px;font-size:15px}.pp p{margin:6px 0;white-space:pre-wrap}
+.pp .row{margin-top:8px}.pp button{padding:5px 8px;font-size:12px}
+dialog{border:1px solid var(--line);border-radius:14px;padding:18px;width:min(92vw,380px);background:var(--bg);color:var(--fg)}
+dialog::backdrop{background:rgba(0,0,0,.4)}
+dialog h2{margin:0 0 12px;font-size:16px}
+#fab{position:absolute;z-index:1000;top:10px;right:10px;display:flex;flex-direction:column;gap:8px}
+#fab button{background:var(--bg);box-shadow:0 1px 5px rgba(0,0,0,.35);border:0;font-size:16px;padding:8px 11px}
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#111c;color:#fff;padding:9px 16px;border-radius:20px;z-index:3000;display:none;max-width:90vw}
+@media (max-width:760px){
+  #app{flex-direction:column}
+  #sidebar{order:2;width:100%;height:46vh;border-right:0;border-top:1px solid var(--line)}
+}
+</style>
 </head>
 <body>
+<div id="app">
+  <div id="map"></div>
+  <aside id="sidebar">
+    <nav id="tabs"></nav>
+    <div id="panes"></div>
+  </aside>
+</div>
+<div id="fab">
+  <button id="btnSide" title="顯示/隱藏側邊欄">☰</button>
+  <button id="btnLocate" title="我的位置">📍</button>
+</div>
+<dialog id="dlg"><h2 id="dlgTitle"></h2><div id="dlgBody"></div></dialog>
+<div id="toast"></div>
 
-    <!-- 側邊欄 -->
-    <div id="sidebar">
-        <h2>🗺️ 我的私房景點</h2>
-        <p>提示：在地圖任意空白處點擊，或下方直接輸入座標新增！</p>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+/* =====================================================================
+ * 個人專屬地圖 — 階段一 + 階段二
+ *
+ * 架構與後續擴充點（階段三、四請從這裡接）：
+ *  - Store.state = { version, categories[], markers[], routes[] , ...未知欄位會保留 }
+ *      routes 已預留，建議結構：
+ *      { id, name, profile:'foot'|'driving'|'bike', waypoints:[{lat,lng}],
+ *        geometry:[[lat,lng],...], distance(m), duration(s), createdAt, track?:[{lat,lng,t}] }
+ *  - Bus：簡易事件匯流排。已發出 marker:added / marker:updated / marker:removed / data:changed
+ *  - UI.addTab({id,label,init(el),refresh?()})：新增側邊欄分頁（階段三的「路線」分頁用這個）
+ *  - Hooks.navigateTo(marker)：階段三實作後，彈窗的「規劃從目前位置到這裡」就會呼叫它
+ *  - App.getLocation()：回傳 Promise<{lat,lng}>，供導航起點使用
+ *  - Store.exportJSON / importJSON：已涵蓋整個 state，未來新增的資料自動進入備份
+ * ===================================================================== */
+'use strict';
 
-        <!-- 新增：手動輸入座標表單 -->
-        <div class="coord-form-box">
-            <h3>📌 輸入座標新增標記</h3>
-            <input type="text" id="input-lat" placeholder="緯度 (例: 25.0330)">
-            <input type="text" id="input-lng" placeholder="經度 (例: 121.5654)">
-            <input type="text" id="input-name" placeholder="地點名稱">
-            <input type="text" id="input-note" placeholder="個人筆記 (選填)">
-            <button onclick="addMarkerByCoords()">新增至地圖</button>
-        </div>
+const KEY = 'personalMap.v1';
+const VIEW_KEY = 'personalMap.view';
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const isHex = s => /^#[0-9a-f]{6}$/i.test(s);
+const stars = n => n > 0 ? '★'.repeat(n) + '☆'.repeat(5 - n) : '';
 
-        <h3>📋 清單列表</h3>
-        <ul id="place-list">
-            <!-- 動態插入清單 -->
-        </ul>
+function toast(msg, ms = 2200) {
+  const t = $('#toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.style.display = 'none', ms);
+}
+
+const Bus = {
+  h: {},
+  on(e, f) { (this.h[e] = this.h[e] || []).push(f); },
+  emit(e, d) { (this.h[e] || []).forEach(f => f(d)); }
+};
+
+const Hooks = { navigateTo: null };   // 階段三實作
+
+/* ---------------- Store ---------------- */
+const Store = {
+  state: null,
+  fresh() {
+    return {
+      version: 1,
+      categories: [
+        { id: 'food',   name: '美食',     emoji: '🍜', color: '#ef4444' },
+        { id: 'secret', name: '私房景點', emoji: '⭐', color: '#a855f7' },
+        { id: 'cafe',   name: '咖啡',     emoji: '☕', color: '#92400e' },
+        { id: 'stay',   name: '住宿',     emoji: '🏨', color: '#2563eb' },
+        { id: 'other',  name: '其他',     emoji: '📍', color: '#6b7280' }
+      ],
+      markers: [],
+      routes: []
+    };
+  },
+  normalize(d) {
+    const f = this.fresh();
+    d = (d && typeof d === 'object') ? d : {};
+    let cats = (Array.isArray(d.categories) ? d.categories : []).filter(c => c && c.id)
+      .map(c => ({ id: String(c.id), name: String(c.name || '未命名'), emoji: String(c.emoji || '📍'), color: isHex(c.color) ? c.color : '#6b7280' }));
+    if (!cats.length) cats = f.categories;
+    if (!cats.some(c => c.id === 'other')) cats.push(f.categories[4]);
+    const ids = new Set(cats.map(c => c.id));
+    const markers = (Array.isArray(d.markers) ? d.markers : [])
+      .filter(m => m && Number.isFinite(+m.lat) && Number.isFinite(+m.lng))
+      .map(m => ({
+        id: String(m.id || uid()), name: String(m.name || '未命名'),
+        catId: ids.has(m.catId) ? m.catId : 'other',
+        rating: Math.min(5, Math.max(0, parseInt(m.rating) || 0)),
+        note: String(m.note || ''), lat: +m.lat, lng: +m.lng,
+        createdAt: m.createdAt || Date.now(), updatedAt: m.updatedAt || Date.now()
+      }));
+    return { ...d, version: 1, categories: cats, markers, routes: Array.isArray(d.routes) ? d.routes : [] };
+  },
+  load() {
+    try { const r = localStorage.getItem(KEY); this.state = r ? this.normalize(JSON.parse(r)) : this.fresh(); }
+    catch (e) { this.state = this.fresh(); }
+  },
+  save() {
+    try { localStorage.setItem(KEY, JSON.stringify(this.state)); }
+    catch (e) { toast('⚠️ 瀏覽器儲存失敗，請盡快匯出備份'); }
+  },
+  exportJSON() {
+    const blob = new Blob([JSON.stringify({ ...this.state, exportedAt: new Date().toISOString() }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    a.href = URL.createObjectURL(blob);
+    a.download = `my-map-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  },
+  importJSON(text, overwrite) {
+    const inc = this.normalize(JSON.parse(text));
+    if (overwrite) { this.state = inc; }
+    else {
+      const mergeBy = (a, b) => { const m = new Map(a.map(x => [x.id, x])); b.forEach(x => m.set(x.id, x)); return [...m.values()]; };
+      const cur = this.state;
+      this.state = this.normalize({
+        ...cur, ...inc,
+        categories: mergeBy(cur.categories, inc.categories),
+        markers: mergeBy(cur.markers, inc.markers),
+        routes: mergeBy(cur.routes, inc.routes)
+      });
+    }
+    this.save(); Bus.emit('data:changed');
+    return inc.markers.length;
+  }
+};
+
+/* ---------------- Categories ---------------- */
+const Cats = {
+  get(id) { const l = Store.state.categories; return l.find(c => c.id === id) || l.find(c => c.id === 'other'); },
+  options(sel) { return Store.state.categories.map(c => `<option value="${esc(c.id)}" ${c.id === sel ? 'selected' : ''}>${esc(c.emoji)} ${esc(c.name)}</option>`).join(''); },
+  icon(c) {
+    return L.divIcon({
+      className: 'pin',
+      html: `<div class="pin-body" style="background:${c.color}"><span>${esc(c.emoji)}</span></div>`,
+      iconSize: [30, 30], iconAnchor: [15, 30], popupAnchor: [0, -28]
+    });
+  }
+};
+
+/* ---------------- Map ---------------- */
+const saved = (() => { try { return JSON.parse(localStorage.getItem(VIEW_KEY)); } catch (e) { return null; } })();
+const map = L.map('map', { zoomControl: true }).setView(saved ? [saved.lat, saved.lng] : [25.0330, 121.5654], saved ? saved.z : 13);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+}).addTo(map);
+map.on('moveend', () => {
+  const c = map.getCenter();
+  try { localStorage.setItem(VIEW_KEY, JSON.stringify({ lat: c.lat, lng: c.lng, z: map.getZoom() })); } catch (e) {}
+});
+
+const App = {
+  pick: null,           // 地圖選點回呼
+  me: null,
+  getLocation() {
+    return new Promise((res, rej) => {
+      if (!navigator.geolocation) return rej(new Error('此瀏覽器不支援定位'));
+      navigator.geolocation.getCurrentPosition(
+        p => { this.me = { lat: p.coords.latitude, lng: p.coords.longitude }; res(this.me); },
+        e => rej(new Error('無法取得位置（請允許定位權限；需 https 或 localhost）')),
+        { enableHighAccuracy: true, timeout: 12000 });
+    });
+  }
+};
+
+/* ---------------- Markers ---------------- */
+const Markers = {
+  layer: L.layerGroup().addTo(map),
+  byId: {},
+  render() {
+    this.layer.clearLayers(); this.byId = {};
+    Store.state.markers.forEach(m => {
+      const mk = L.marker([m.lat, m.lng], { icon: Cats.icon(Cats.get(m.catId)), title: m.name });
+      mk.bindPopup(() => this.popup(m));
+      mk.addTo(this.layer);
+      this.byId[m.id] = mk;
+    });
+  },
+  popup(m) {
+    const c = Cats.get(m.catId), d = document.createElement('div');
+    d.className = 'pp';
+    d.innerHTML = `<h3>${esc(c.emoji)} ${esc(m.name)}</h3>
+      <div class="muted">${esc(c.name)} ${stars(m.rating)}</div>
+      ${m.note ? `<p>${esc(m.note)}</p>` : ''}
+      <div class="muted">${m.lat.toFixed(5)}, ${m.lng.toFixed(5)}</div>
+      <div class="row"><button class="primary" data-a="nav">🧭 規劃從目前位置到這裡</button>
+      <button data-a="edit">編輯</button><button data-a="del" class="danger">刪除</button></div>`;
+    d.addEventListener('click', e => {
+      const a = e.target.dataset.a; if (!a) return;
+      if (a === 'nav') {
+        if (Hooks.navigateTo) Hooks.navigateTo(m); else toast('🧭 路線規劃將於階段三開放');
+      } else if (a === 'edit') { map.closePopup(); Form.openEdit(m); }
+      else if (a === 'del') { if (confirm(`刪除「${m.name}」？`)) this.remove(m.id); }
+    });
+    return d;
+  },
+  add(d) {
+    const m = { id: uid(), ...d, createdAt: Date.now(), updatedAt: Date.now() };
+    Store.state.markers.push(m); Store.save();
+    Bus.emit('marker:added', m); Bus.emit('data:changed'); return m;
+  },
+  update(id, d) {
+    const m = Store.state.markers.find(x => x.id === id); if (!m) return;
+    Object.assign(m, d, { updatedAt: Date.now() }); Store.save();
+    Bus.emit('marker:updated', m); Bus.emit('data:changed');
+  },
+  remove(id) {
+    Store.state.markers = Store.state.markers.filter(x => x.id !== id); Store.save();
+    Bus.emit('marker:removed', id); Bus.emit('data:changed');
+  },
+  focus(id) {
+    const mk = this.byId[id]; if (!mk) return;
+    let done = false;
+    const open = () => { if (!done) { done = true; mk.openPopup(); } };
+    map.flyTo(mk.getLatLng(), Math.max(map.getZoom(), 16), { duration: 1 });
+    map.once('moveend', open); setTimeout(open, 1600);
+  }
+};
+
+/* ---------------- Form（地圖點擊 / 編輯 / 座標新增 共用） ---------------- */
+function parseCoordPair(s) {
+  const m = String(s).match(/(-?\d+(?:\.\d+)?)\s*[,，\s]\s*(-?\d+(?:\.\d+)?)/);
+  return m ? [+m[1], +m[2]] : null;
+}
+function buildForm(o) {
+  const m = o.marker || {};
+  const f = document.createElement('form');
+  f.innerHTML = `
+    <label>名稱<input name="name" required maxlength="80" value="${esc(m.name || '')}" placeholder="例如：巷口那家滷肉飯"></label>
+    <div class="two">
+      <label>分類<select name="cat">${Cats.options(m.catId || o.catId)}</select></label>
+      <label>評分<select name="rating">${[0,1,2,3,4,5].map(n => `<option value="${n}" ${n === (m.rating || 0) ? 'selected' : ''}>${n ? '★'.repeat(n) : '未評分'}</option>`).join('')}</select></label>
     </div>
+    <label>筆記<textarea name="note" rows="3" placeholder="個人心得、營業時間、停車資訊…">${esc(m.note || '')}</textarea></label>
+    <div class="two">
+      <label>緯度<input name="lat" required inputmode="decimal" value="${o.lat ?? m.lat ?? ''}" placeholder="25.033964"></label>
+      <label>經度<input name="lng" required inputmode="decimal" value="${o.lng ?? m.lng ?? ''}" placeholder="121.564468"></label>
+    </div>
+    <div class="row">
+      ${o.onCancel ? '<button type="button" data-a="cancel">取消</button>' : ''}
+      ${o.pick ? '<button type="button" data-a="pick">📌 從地圖選點</button>' : ''}
+      <button class="primary">${o.submitText || '儲存'}</button>
+    </div>`;
+  // 貼上「25.03, 121.56」到緯度欄時自動拆開
+  f.lat.addEventListener('input', () => {
+    const p = parseCoordPair(f.lat.value);
+    if (p && /[,，\s]/.test(f.lat.value.trim())) { f.lat.value = p[0]; f.lng.value = p[1]; }
+  });
+  f.addEventListener('click', e => {
+    const a = e.target.dataset.a;
+    if (a === 'cancel') o.onCancel();
+    if (a === 'pick') {
+      App.pick = ll => { f.lat.value = ll.lat.toFixed(6); f.lng.value = ll.lng.toFixed(6); toast('已填入座標'); };
+      toast('請在地圖上點選位置');
+    }
+  });
+  f.addEventListener('submit', e => {
+    e.preventDefault();
+    const lat = parseFloat(f.lat.value), lng = parseFloat(f.lng.value);
+    if (!(lat >= -90 && lat <= 90) || !(lng >= -180 && lng <= 180)) return toast('座標格式不正確（緯度 -90~90、經度 -180~180）');
+    o.onSubmit({ name: f.name.value.trim() || '未命名', catId: f.cat.value, rating: +f.rating.value, note: f.note.value.trim(), lat, lng });
+  });
+  return f;
+}
 
-    <!-- 地圖主畫面 -->
-    <div id="map"></div>
+const Form = {
+  dlg: $('#dlg'), tmp: null,
+  clearTmp() { if (this.tmp) { map.removeLayer(this.tmp); this.tmp = null; } },
+  open(title, form) {
+    $('#dlgTitle').textContent = title;
+    const b = $('#dlgBody'); b.innerHTML = ''; b.appendChild(form);
+    this.dlg.showModal(); setTimeout(() => form.name.focus(), 50);
+  },
+  close() { if (this.dlg.open) this.dlg.close(); },
+  openNew(ll) {
+    this.clearTmp();
+    this.tmp = L.circleMarker(ll, { radius: 8, color: '#2563eb', weight: 3, fillOpacity: .3 }).addTo(map);
+    this.open('新增標記', buildForm({
+      lat: ll.lat.toFixed(6), lng: ll.lng.toFixed(6), catId: 'food',
+      onCancel: () => this.close(),
+      onSubmit: d => { this.close(); const m = Markers.add(d); toast('已新增'); Markers.focus(m.id); }
+    }));
+  },
+  openEdit(m) {
+    this.clearTmp();
+    this.open('編輯標記', buildForm({
+      marker: m,
+      onCancel: () => this.close(),
+      onSubmit: d => { this.close(); Markers.update(m.id, d); toast('已更新'); }
+    }));
+  }
+};
+Form.dlg.addEventListener('close', () => Form.clearTmp());
 
-    <!-- 引入 Leaflet JS -->
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script>
-        // 1. 初始化地圖 (以台北市為預設中心點)
-        const map = L.map('map').setView([25.0330, 121.5654], 13);
+let lastPopupClose = 0;
+map.on('popupclose', () => lastPopupClose = Date.now());
+map.on('click', e => {
+  if (App.pick) { const p = App.pick; App.pick = null; p(e.latlng); return; }
+  if (Date.now() - lastPopupClose < 250) return;   // 點空白處關閉彈窗時，不要同時開表單
+  Form.openNew(e.latlng);
+});
 
-        // 2. 載入 OpenStreetMap 圖資
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19,
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        }).addTo(map);
+/* ---------------- UI：側邊欄分頁 ---------------- */
+const UI = {
+  tabs: [],
+  addTab(t) {
+    const btn = document.createElement('button'); btn.textContent = t.label; btn.dataset.id = t.id;
+    const pane = document.createElement('div'); pane.className = 'pane'; pane.id = 'pane-' + t.id;
+    $('#tabs').appendChild(btn); $('#panes').appendChild(pane);
+    btn.onclick = () => this.show(t.id);
+    this.tabs.push({ ...t, btn, pane });
+    t.init(pane);
+    if (this.tabs.length === 1) this.show(t.id);
+  },
+  show(id) {
+    this.tabs.forEach(t => { const on = t.id === id; t.btn.classList.toggle('on', on); t.pane.classList.toggle('on', on); });
+  },
+  refresh() { this.tabs.forEach(t => t.refresh && t.refresh()); }
+};
+Bus.on('data:changed', () => { Markers.render(); UI.refresh(); });
 
-        // 3. 從 LocalStorage 讀取已儲存的地點資料
-        let places = JSON.parse(localStorage.getItem('my_private_places')) || [];
-        let markersLayer = L.layerGroup().addTo(map);
+/* --- 分頁：清單 --- */
+UI.addTab({
+  id: 'list', label: '📋 清單',
+  init(el) {
+    el.innerHTML = `<div class="filters"><input id="q" type="search" placeholder="搜尋名稱或筆記…"><select id="fcat"></select></div>
+      <ul class="items" id="items"></ul><div class="muted" id="count"></div>`;
+    const q = $('#q', el), fc = $('#fcat', el), ul = $('#items', el);
+    const draw = () => {
+      const kw = q.value.trim().toLowerCase(), cat = fc.value;
+      const list = Store.state.markers.filter(m => (!cat || m.catId === cat) && (!kw || (m.name + ' ' + m.note).toLowerCase().includes(kw)))
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+      ul.innerHTML = list.map(m => { const c = Cats.get(m.catId);
+        return `<li data-id="${esc(m.id)}"><span class="ic">${esc(c.emoji)}</span><div><div class="t">${esc(m.name)}</div>
+        <div class="muted">${esc(c.name)} ${stars(m.rating)}</div>${m.note ? `<div class="muted">${esc(m.note.slice(0, 40))}</div>` : ''}</div></li>`; }).join('')
+        || '<li class="muted" style="cursor:default">還沒有標記。點擊地圖任一處即可新增。</li>';
+      $('#count', el).textContent = `共 ${Store.state.markers.length} 個標記` + (list.length !== Store.state.markers.length ? `，顯示 ${list.length}` : '');
+    };
+    this.refresh = () => {
+      const cur = fc.value;
+      fc.innerHTML = '<option value="">全部分類</option>' + Cats.options(cur); fc.value = cur;
+      draw();
+    };
+    q.oninput = draw; fc.onchange = draw;
+    ul.onclick = e => {
+      const li = e.target.closest('li[data-id]'); if (!li) return;
+      if (innerWidth <= 760) { /* 手機：保留側欄，地圖在上方可見 */ }
+      Markers.focus(li.dataset.id);
+    };
+    this.refresh();
+  }
+});
 
-        // 渲染地圖標記與側邊清單
-        function renderPlaces() {
-            markersLayer.clearLayers();
-            const listContainer = document.getElementById('place-list');
-            listContainer.innerHTML = '';
+/* --- 分頁：座標新增 --- */
+UI.addTab({
+  id: 'coord', label: '🎯 座標',
+  init(el) {
+    const mount = () => {
+      el.innerHTML = '<p class="muted">輸入經緯度精準新增標記。可直接把「25.033964, 121.564468」貼在緯度欄，會自動拆成兩欄。</p>';
+      el.appendChild(buildForm({
+        catId: 'food', pick: true, submitText: '新增標記',
+        onSubmit: d => { const m = Markers.add(d); toast('已新增'); Markers.focus(m.id); mount(); }
+      }));
+    };
+    mount();
+    this.refresh = () => {   // 分類變動時，更新下拉選單
+      const s = $('select[name=cat]', el); if (s) { const v = s.value; s.innerHTML = Cats.options(v); s.value = v; }
+    };
+  }
+});
 
-            places.forEach((place) => {
-                // 建立地圖標記
-                const marker = L.marker([place.lat, place.lng]).addTo(markersLayer);
-                marker.bindPopup(`<b>${place.name}</b><br>${place.note || '無筆記'}`);
-
-                // 建立側邊欄清單項目
-                const li = document.createElement('li');
-                li.className = 'place-item';
-                li.innerHTML = `<h3>📍 ${place.name}</h3><p>${place.note || '點擊查看詳情'}</p>`;
-                
-                // 點擊清單項目時，地圖飛向該點並彈出 Popup
-                li.addEventListener('click', () => {
-                    map.flyTo([place.lat, place.lng], 16);
-                    marker.openPopup();
-                });
-
-                listContainer.appendChild(li);
-            });
-        }
-
-        // 初始化渲染
-        renderPlaces();
-
-        // 4. 監聽地圖點擊事件，動態新增標記
-        map.on('click', function(e) {
-            const lat = e.latlng.lat;
-            const lng = e.latlng.lng;
-
-            const popupContent = `
-                <div class="popup-form">
-                    <h3>新增私房景點</h3>
-                    <label>地點名稱：</label>
-                    <input type="text" id="new-name" placeholder="例如：巷弄咖啡廳">
-                    <label>個人筆記：</label>
-                    <textarea id="new-note" placeholder="例如：拿鐵很好喝"></textarea>
-                    <button onclick="savePlace(${lat}, ${lng})">儲存地點</button>
-                </div>
-            `;
-
-            L.popup()
-                .setLatLng([lat, lng])
-                .setContent(popupContent)
-                .openOn(map);
+/* --- 分頁：分類管理 --- */
+UI.addTab({
+  id: 'cats', label: '🏷️ 分類',
+  init(el) {
+    const draw = () => {
+      el.innerHTML = '<p class="muted">自訂圖示（emoji）與顏色，地圖標記會同步更新。</p><div id="catlist"></div><button id="addCat">＋ 新增分類</button>';
+      const box = $('#catlist', el);
+      Store.state.categories.forEach(c => {
+        const r = document.createElement('div'); r.className = 'catrow';
+        r.innerHTML = `<input data-k="emoji" value="${esc(c.emoji)}" maxlength="4"><input data-k="name" value="${esc(c.name)}" maxlength="20">
+          <input data-k="color" type="color" value="${esc(c.color)}"><button class="danger" ${c.id === 'other' ? 'disabled' : ''} title="刪除">✕</button>`;
+        r.addEventListener('change', e => {
+          const k = e.target.dataset.k; if (!k) return;
+          c[k] = e.target.value || c[k]; Store.save(); Bus.emit('data:changed');
         });
-
-        // 透過地圖點擊彈窗儲存的函數
-        window.savePlace = function(lat, lng) {
-            const name = document.getElementById('new-name').value.trim();
-            const note = document.getElementById('new-note').value.trim();
-
-            if (!name) {
-                alert('請輸入地點名稱！');
-                return;
-            }
-
-            places.push({ name, note, lat, lng });
-            localStorage.setItem('my_private_places', JSON.stringify(places));
-
-            map.closePopup();
-            renderPlaces();
+        r.querySelector('button').onclick = () => {
+          if (!confirm(`刪除分類「${c.name}」？此分類的標記會移到「其他」。`)) return;
+          Store.state.markers.forEach(m => { if (m.catId === c.id) m.catId = 'other'; });
+          Store.state.categories = Store.state.categories.filter(x => x.id !== c.id);
+          Store.save(); Bus.emit('data:changed'); draw();
         };
+        box.appendChild(r);
+      });
+      $('#addCat', el).onclick = () => {
+        Store.state.categories.push({ id: uid(), name: '新分類', emoji: '🔖', color: '#0ea5e9' });
+        Store.save(); Bus.emit('data:changed'); draw();
+      };
+    };
+    draw();
+    this.refresh = () => { if (!el.contains(document.activeElement)) draw(); };
+  }
+});
 
-        // 5. 新增：透過手動輸入座標按鈕觸發的函數
-        window.addMarkerByCoords = function() {
-            const lat = parseFloat(document.getElementById('input-lat').value);
-            const lng = parseFloat(document.getElementById('input-lng').value);
-            const name = document.getElementById('input-name').value.trim();
-            const note = document.getElementById('input-note').value.trim();
+/* --- 分頁：資料備份 --- */
+UI.addTab({
+  id: 'data', label: '💾 資料',
+  init(el) {
+    el.innerHTML = `<p class="muted">資料會自動存在這個瀏覽器（LocalStorage）。換裝置或清除瀏覽器資料前，請先匯出備份。</p>
+      <div class="row" style="margin-bottom:14px"><button class="primary" id="exp">⬇️ 匯出 JSON</button></div>
+      <label>匯入 JSON 檔<input type="file" id="imp" accept="application/json,.json"></label>
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="ovr" style="width:auto;margin:0"> 覆蓋現有資料（預設為合併，相同 ID 以匯入為準）</label>
+      <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
+      <button class="danger" id="clr">🗑️ 清除全部資料</button>`;
+    $('#exp', el).onclick = () => Store.exportJSON();
+    $('#imp', el).onchange = async e => {
+      const f = e.target.files[0]; if (!f) return;
+      try {
+        const n = Store.importJSON(await f.text(), $('#ovr', el).checked);
+        toast(`匯入完成（檔內 ${n} 個標記）`);
+      } catch (err) { toast('匯入失敗：不是有效的 JSON 備份檔'); }
+      e.target.value = '';
+    };
+    $('#clr', el).onclick = () => {
+      if (confirm('確定清除全部標記、分類與路線？此動作無法復原，建議先匯出備份。')) {
+        Store.state = Store.fresh(); Store.save(); Bus.emit('data:changed'); toast('已清除');
+      }
+    };
+  }
+});
 
-            if (isNaN(lat) || isNaN(lng)) {
-                alert('請輸入有效的緯度與經度數字！');
-                return;
-            }
-            if (!name) {
-                alert('請輸入地點名稱！');
-                return;
-            }
+/* ---------------- 右上角按鈕 ---------------- */
+let meMarker = null;
+$('#btnLocate').onclick = async () => {
+  try {
+    const p = await App.getLocation();
+    if (meMarker) map.removeLayer(meMarker);
+    meMarker = L.circleMarker([p.lat, p.lng], { radius: 8, color: '#fff', weight: 3, fillColor: '#2563eb', fillOpacity: 1 }).addTo(map);
+    map.flyTo([p.lat, p.lng], Math.max(map.getZoom(), 16));
+  } catch (e) { toast(e.message); }
+};
+$('#btnSide').onclick = () => { document.body.classList.toggle('side-closed'); setTimeout(() => map.invalidateSize(), 50); };
+addEventListener('resize', () => map.invalidateSize());
 
-            // 加入陣列並存入 LocalStorage
-            places.push({ name, note, lat, lng });
-            localStorage.setItem('my_private_places', JSON.stringify(places));
-
-            // 重新渲染並移動地圖焦點
-            renderPlaces();
-            map.flyTo([lat, lng], 16);
-
-            // 清空輸入框
-            document.getElementById('input-lat').value = '';
-            document.getElementById('input-lng').value = '';
-            document.getElementById('input-name').value = '';
-            document.getElementById('input-note').value = '';
-        };
-    </script>
+/* ---------------- 啟動 ---------------- */
+Store.load();
+Markers.render();
+UI.refresh();
+</script>
 </body>
 </html>
