@@ -1134,15 +1134,51 @@ UI.addTab({
   id: 'import', label: '📁 匯入', parent: 'more', hidden: true,
   init(el) {
     el.innerHTML = `<p class="muted">匯入 CSV、JSON（物件陣列）或 GeoJSON，例如加油站、全聯門市清單。欄位可用：名稱（name／店名／站名）、緯度（lat）、經度（lng／lon）、地址、營業時間、備註、分類。支援 UTF-8 與 Big5 編碼。</p>
+      <div class="hrsbox"><b>⚡ 一鍵匯入（內建來源）</b>
+        <div class="muted" style="margin:4px 0 8px">按下後自動下載並進入預覽，可再篩選縣市後才匯入。若政府網站不允許瀏覽器直接讀取，會改透過公共轉送服務（allorigins／corsproxy）取得這份公開資料；都失敗時請改用下方「選擇檔案」。</div>
+        <div id="iSrc"></div><div class="muted" id="iSrcSt"></div></div>
       <label>選擇檔案（CSV／JSON／GeoJSON／本程式備份檔）<input type="file" id="iFile"></label>
       <label>或從網址載入（對方網站需允許跨來源存取）</label>
       <div class="row" style="margin:-4px 0 8px"><input id="iUrl" placeholder="https://…/stations.csv" style="flex:1"><button id="iLoad">載入</button></div>
       <div id="iPv"></div>
       <p><a href="#" id="iSample">⬇️ 下載範例 CSV（看欄位格式）</a></p>`;
     const pv = $('#iPv', el);
+    const SOURCES = [   // 日後要新增其他一鍵匯入來源，在這裡加一筆即可
+      { id: 'speedcam', label: '🚦 測速執法設置點（內政部警政署）', desc: '全國固定測速照相，含速限與拍攝方向；預設只勾臺北市',
+        url: 'https://opdadm.moi.gov.tw/api/v1/no-auth/resource/api/dataset/EA5E6FCD-B82D-43B7-A5CF-E9893253187E/resource/776A91B0-446D-4510-98D8-D52A1FF95562/download',
+        name: '測速執法設置點', opts: { cities: ['臺北市'], bn: '測速執法設置點' } }
+    ];
+    const getText = async url => {   // 先直接連線；被瀏覽器擋住（CORS）才改走公共轉送服務
+      const tries = [[url, ''], ['https://api.allorigins.win/raw?url=' + encodeURIComponent(url), '（經公共轉送服務）'], ['https://corsproxy.io/?' + encodeURIComponent(url), '（經公共轉送服務）']];
+      let err;
+      for (const [u, via] of tries) {
+        const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), 25000);
+        try {
+          const r = await fetch(u, { signal: ctl.signal }); if (!r.ok) throw new Error('HTTP ' + r.status);
+          const text = Importer.decode(await r.arrayBuffer());
+          if (text.length < 50 || /^\s*</.test(text)) throw new Error('不是資料檔');
+          return { text, via };
+        } catch (e) { err = e; } finally { clearTimeout(tm); }
+      }
+      throw err;
+    };
+    const srcBox = $('#iSrc', el), srcSt = $('#iSrcSt', el);
+    srcBox.innerHTML = SOURCES.map(s => `<button type="button" class="primary" data-s="${s.id}" style="width:100%;margin-bottom:6px;text-align:left">${s.label}<div style="font-weight:400;font-size:12px">${s.desc}</div></button>`).join('');
+    srcBox.onclick = async e => {
+      const b = e.target.closest('button[data-s]'); if (!b) return;
+      const s = SOURCES.find(x => x.id === b.dataset.s); if (!s) return;
+      b.disabled = true; srcSt.textContent = '⏳ 下載中…（若直接連線被擋，會自動改用轉送服務，可能多等幾秒）'; pv.innerHTML = '';
+      try {
+        const { text, via } = await getText(s.url);
+        srcSt.textContent = `✅ 已取得「${s.name}」${via}`; load(text, s.name + '.csv', s.opts);
+      } catch (err) {
+        srcSt.innerHTML = `❌ 自動下載失敗。請改為：<a href="${esc(s.url)}" target="_blank" rel="noopener">先下載檔案</a>，再用下方「選擇檔案」匯入。`;
+      }
+      b.disabled = false;
+    };
     let rows = [], skipped = 0;
 
-    const load = (text, name) => {
+    const load = (text, name, opts) => {
       try {
         const tr = text.trim();
         if (tr[0] === '{' && /"markers"\s*:/.test(tr)) {   // 本程式的備份檔：直接在這裡還原
@@ -1163,12 +1199,12 @@ UI.addTab({
           const keys = recs[0] ? Object.keys(recs[0]).slice(0, 12).join('、') : '（無）';
           pv.innerHTML = `<p class="muted">❌ 找不到可用的資料列：需要有緯度、經度欄位。共讀到 ${recs.length} 列，偵測到的欄位：${esc(keys)}。</p>`; return;
         }
-        preview(name);
+        preview(name, opts);
       } catch (e) { pv.innerHTML = `<p class="muted">❌ 解析失敗：${esc(e.message)}</p>`; }
     };
 
-    const preview = name => {
-      const base = String(name).replace(/\.[^.]*$/, '').slice(0, 30);
+    const preview = (name, opts = {}) => {
+      const base = opts.bn || String(name).replace(/\.[^.]*$/, '').slice(0, 30);
       const hasLimit = rows.some(r => r.limit > 0), NOCITY = '（未標示縣市）';
       const cc = new Map(); rows.forEach(r => { const c = r.city || NOCITY; cc.set(c, (cc.get(c) || 0) + 1); });
       const cityList = [...cc.entries()].sort((a, b) => b[1] - a[1]);
@@ -1206,6 +1242,10 @@ UI.addTab({
         if (Store.state.categories.some(c => c.id === 'speedcam')) $('#iCat', pv).value = 'speedcam';
         else { $('#iCat', pv).value = '__new__'; $('#iNn', pv).value = '測速照相'; $('#iNe', pv).value = '📸'; }
         showNew();
+      }
+      if (opts.cities && opts.cities.length) {   // 內建來源的預設篩選（例如只勾臺北市），使用者仍可更改
+        const boxes = [...pv.querySelectorAll('#iCities input')];
+        if (boxes.some(i => opts.cities.includes(i.dataset.c))) boxes.forEach(i => { i.checked = opts.cities.includes(i.dataset.c); });
       }
       upd();
       $('#iCancel', pv).onclick = () => { pv.innerHTML = ''; rows = []; };
