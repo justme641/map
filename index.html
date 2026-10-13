@@ -136,6 +136,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const isHex = s => /^#[0-9a-f]{6}$/i.test(s);
 const stars = n => n > 0 ? '★'.repeat(n) + '☆'.repeat(5 - n) : '';
 const fmtDate = ts => { if (!ts) return '—'; const d = new Date(ts), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+const houseNo = n => { n = String(n || '').trim(); return n ? (/[號号]\s*$|[號号]之|[樓楼]/.test(n) ? n : n + '號') : ''; };   // OSM 門牌常已含「號」，避免重複
 const fmtDist = m => m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km';
 const hav = (a, b) => { const r = Math.PI / 180, dLat = (b.lat - a.lat) * r, dLng = (b.lng - a.lng) * r,
   x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2; return 12742000 * Math.asin(Math.sqrt(x)); };
@@ -170,7 +171,7 @@ const Store = {
       markers: [],
       routes: [],
       places: [],      // 常用地點 {id,name,lat,lng}
-      settings: { v: 3, startMode: 'gps', defaultPlaceId: '', defaultZoom: 17, searchRadiusKm: 2, autoGeocode: true, longPressMs: 700 }
+      settings: { v: 3, startMode: 'gps', defaultPlaceId: '', defaultZoom: 17, searchRadiusKm: 2, autoGeocode: true, longPressMs: 700, scope: { country: 'tw', region: '' }, scopeBox: null }
     };
   },
   normalize(d) {
@@ -191,13 +192,14 @@ const Store = {
         note: String(m.note || ''), lat: +m.lat, lng: +m.lng,
         addr: String(m.addr || ''), hours: String(m.hours || ''), hoursUpdatedAt: +m.hoursUpdatedAt || 0,
         hoursData: (m.hoursData && typeof m.hoursData === 'object') ? m.hoursData : null, hoursNote: String(m.hoursNote || ''),
-        src: m.src || '', osmId: m.osmId || '',
+        src: m.src || '', osmId: m.osmId || '', batch: m.batch ? String(m.batch) : '', batchName: String(m.batchName || ''),
         createdAt: m.createdAt || Date.now(), updatedAt: m.updatedAt || Date.now()
       }));
     const places = (Array.isArray(d.places) ? d.places : []).filter(p => p && Number.isFinite(+p.lat) && Number.isFinite(+p.lng))
       .map(p => ({ id: String(p.id || uid()), name: String(p.name || '未命名'), lat: +p.lat, lng: +p.lng }));
     const ds = (d.settings && typeof d.settings === 'object') ? d.settings : {};
     const settings = { ...f.settings, ...ds };
+    if (!settings.scope || typeof settings.scope !== 'object') settings.scope = { country: 'tw', region: '' };
     if (!(ds.v >= 2)) { settings.v = 2; settings.defaultZoom = 17; }   // 預設縮放改為 17（舊資料只遷移一次，之後依你的設定）
     settings.searchRadiusKm = Math.min(5, Math.max(0.1, +settings.searchRadiusKm || 2));
     if (!(ds.v >= 3)) {   // 一次性整理：刪除沒用到的「咖啡、住宿」，補上美食底下的子分類
@@ -406,7 +408,7 @@ const Geo = {
   },
   addrFromTags(t) {
     if (t['addr:full']) return t['addr:full'];
-    return [t['addr:city'], t['addr:district'] || t['addr:suburb'], t['addr:street'], t['addr:housenumber'] ? t['addr:housenumber'] + '號' : ''].filter(Boolean).join('');
+    return [t['addr:city'], t['addr:district'] || t['addr:suburb'], t['addr:street'], houseNo(t['addr:housenumber'])].filter(Boolean).join('');
   },
   toPlace(e) {
     const t = e.tags || {}, lat = e.lat ?? (e.center && e.center.lat), lng = e.lon ?? (e.center && e.center.lon);
@@ -428,7 +430,7 @@ const Geo = {
       const r = nom.value, a = r.address || {}, nd = r.namedetails || {};
       add('🏪 地點｜' + (r.name || nd.name || nd['name:zh']), r.name || nd.name || nd['name:zh']);
       if (r.extratags && r.extratags.opening_hours) hours = r.extratags.opening_hours;
-      const road = a.road ? a.road + (a.house_number ? a.house_number + '號' : '') : '';
+      const road = a.road ? a.road + houseNo(a.house_number) : '';
       addr = [a.city || a.county || a.state, a.city_district || a.suburb || a.town, road].filter(Boolean).join('') || '';
       if (!addr && r.display_name) addr = r.display_name;
       if (ov.status === 'fulfilled') {
@@ -449,6 +451,40 @@ const Geo = {
     return { names, addr, hours };
   }
 };
+
+/* ---------------- 查詢範圍（國家 → 區域；日後可再加第三層）---------------- */
+// box = [西經, 北緯, 東經, 南緯]（Nominatim viewbox 格式），為粗略範圍
+const SCOPES = {
+  tw: { name: '台灣', regions: {
+    north:   { name: '北部（基隆・台北・新北・桃園・新竹・宜蘭）', box: [120.7, 25.35, 122.1, 24.4] },
+    central: { name: '中部（苗栗・台中・彰化・南投・雲林）',       box: [120.0, 24.75, 121.5, 23.45] },
+    south:   { name: '南部（嘉義・台南・高雄・屏東）',             box: [120.0, 23.65, 121.1, 21.8] },
+    east:    { name: '東部（花蓮・台東）',                         box: [120.7, 24.4, 121.9, 21.85] },
+    penghu:  { name: '離島：澎湖',                                 box: [119.3, 23.85, 119.75, 23.15] },
+    kinmen:  { name: '離島：金門',                                 box: [118.15, 24.6, 118.55, 24.3] },
+    matsu:   { name: '離島：馬祖',                                 box: [119.85, 26.45, 120.6, 25.9] }
+  } },
+  jp: { name: '日本' }, kr: { name: '南韓' }, hk: { name: '香港' }, sg: { name: '新加坡' }, th: { name: '泰國' }, us: { name: '美國' }
+};
+function scopeParams(sc) {
+  sc = sc || Store.state.settings.scope || {};
+  const cc = sc.country || '', c = SCOPES[cc]; let box = null;
+  if (sc.region === 'custom') box = Store.state.settings.scopeBox || null;
+  else if (c && c.regions && c.regions[sc.region]) box = c.regions[sc.region].box;
+  return { cc, box };
+}
+function scopeLabel(sc) {
+  sc = sc || {}; const c = SCOPES[sc.country];
+  const cn = sc.country ? (c ? c.name : String(sc.country).toUpperCase()) : '不限國家';
+  let rn = '';
+  if (sc.region === 'custom') rn = '自訂範圍'; else if (c && c.regions && c.regions[sc.region]) rn = c.regions[sc.region].name.replace(/（.*）/, '');
+  return rn ? `${cn}・${rn}` : (sc.country ? `${cn}全境` : cn);
+}
+function widerScope(sc) {   // 下一個更大的範圍：區域 → 國家全境 → 不限國家
+  if (sc && sc.region) return { country: sc.country || '', region: '' };
+  if (sc && sc.country) return { country: '', region: '' };
+  return null;
+}
 
 /* ---------------- Places：常用地點 ---------------- */
 const Places = {
@@ -676,7 +712,7 @@ const UI = {
     const tab = { ...t, btn, pane };
     this.tabs.push(tab);
     t.init.call(tab, body);
-    if (this.tabs.length === 1) this.show(t.id);
+    if (!t.hidden && !this.shown) { this.shown = true; this.show(t.id); }
   },
   show(id) {
     const cur = this.tabs.find(t => t.id === id); if (!cur) return;
@@ -692,7 +728,7 @@ Bus.on('data:changed', () => { Markers.render(); UI.refresh(); });
 /* --- 分頁：分類（內含標記清單與分類編輯） --- */
 const EMOJIS = '🍜 🍚 🍱 🍣 🍔 🍕 🥟 🥞 🍳 🍽️ 🍰 🍦 🧋 ☕ 🍺 🍷 🛒 🛍️ 🏪 🏬 ⛽ 🚗 🅿️ 🚲 🚇 🚌 🚉 🏨 🏠 ⭐ 🌟 ❤️ 📍 📌 🏞️ ⛰️ 🏖️ 🌳 🌸 ⛩️ 🏛️ 📚 🎓 🏥 💊 🧴 💈 🎮 🎬 🎵 📷 🔧 💡 🐶 🐱 🚻 ⛪ 🏟️ 🎡'.split(' ');
 UI.addTab({
-  id: 'cats', label: '🏷️ 分類',
+  id: 'cats', label: '🏷️ 分類', parent: 'more', hidden: true,
   init(el) {
     el.innerHTML = `<div class="seg"><button type="button" data-v="list" class="on">📋 標記清單</button><button type="button" data-v="edit">✏️ 編輯分類</button></div>
       <div id="cvList"><div class="filters"><input id="q" type="search" placeholder="搜尋名稱、地址或筆記…"><select id="fcat"></select></div>
@@ -772,11 +808,11 @@ UI.addTab({
 
 /* --- 分頁：查詢（原「座標」）：輸入地址或名稱，找地點並新增標記；保留座標新增表單 --- */
 UI.addTab({
-  id: 'coord', label: '🔎 查詢', parent: 'more', hidden: true,
+  id: 'coord', label: '🔍 查詢',
   init(el) {
     el.innerHTML = `<p class="muted">輸入地址、地名或店名（例：台北101、忠孝東路四段），也可直接輸入座標「25.03, 121.56」。結果來自 OpenStreetMap（Nominatim）。</p>
       <div class="row" style="flex-wrap:nowrap;margin-bottom:8px"><input id="qIn" type="search" placeholder="輸入地址或名稱…" style="flex:1"><button class="primary" id="qGo" type="button">查詢</button></div>
-      <div class="muted" id="qSt"></div><ul class="items" id="qList"></ul>
+      <div class="muted" id="qScope"></div><div class="muted" id="qSt"></div><div id="qAsk"></div><ul class="items" id="qList"></ul>
       <details style="margin-top:12px"><summary>📌 以座標新增標記</summary><div id="qForm" style="margin-top:8px"></div></details>`;
     const qIn = $('#qIn', el), st = $('#qSt', el), ul = $('#qList', el), qLayer = L.layerGroup().addTo(map);
     let results = [];
@@ -790,23 +826,67 @@ UI.addTab({
       L.circleMarker([r.lat, r.lng], { radius: 10, color: '#fff', weight: 3, fillColor: '#ef4444', fillOpacity: 1, interactive: false }).addTo(qLayer);
       map.flyTo([r.lat, r.lng], Math.max(defZoom(), 17));
     };
-    const run = async () => {
+    const askBox = $('#qAsk', el), scopeEl = $('#qScope', el);
+    const showScope = () => { scopeEl.textContent = `🌏 查詢範圍：${scopeLabel(Store.state.settings.scope)}（可在「設定」調整）`; };
+    this.onShow = showScope; showScope();
+    const variants = v => {   // 模糊比對：台↔臺、去掉樓層／門牌號、取前段關鍵字、少一個字
+      const out = [v], add = s => { s = (s || '').trim(); if (s && !out.includes(s)) out.push(s); };
+      add(v.replace(/台/g, '臺')); add(v.replace(/臺/g, '台'));
+      const noFloor = v.replace(/[\d一二三四五六七八九十]+\s*[樓Ff](之\d+)?.*$/, '');
+      const noNo = noFloor.replace(/[\d-]+\s*(之[\d-]+)?\s*號.*$/, '').replace(/[\d-]+$/, '');
+      add(noFloor); add(noNo); add(noNo.replace(/台/g, '臺'));
+      const parts = v.split(/[\s,，、]+/).filter(Boolean);
+      if (parts.length > 1) { add(parts[0]); add(parts.slice(0, 2).join(' ')); }
+      if (v.length >= 5) add(v.slice(0, -1));
+      return out.slice(0, 7);
+    };
+    const nom = async (text, sc) => {
+      const { cc, box } = scopeParams(sc), b = map.getBounds();
+      let url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=8&addressdetails=1&accept-language=zh-TW,zh,en&q=${encodeURIComponent(text)}`;
+      if (cc) url += '&countrycodes=' + cc;
+      if (box) url += `&viewbox=${box[0]},${box[1]},${box[2]},${box[3]}&bounded=1`;
+      else url += `&viewbox=${b.getWest()},${b.getNorth()},${b.getEast()},${b.getSouth()}`;
+      const j = await Geo.json(url);
+      return j.map(r => ({ name: String(r.name || r.display_name.split(',')[0]).trim(), addr: r.display_name, lat: +r.lat, lng: +r.lon }));
+    };
+    const run = async over => {
       const v = qIn.value.trim(); if (!v) return;
+      askBox.innerHTML = ''; showScope();
       const cp = parseCoordPair(v);
       if (cp && /^[-+\d.\s,，]+$/.test(v) && Math.abs(cp[0]) <= 90 && Math.abs(cp[1]) <= 180) {
         results = [{ name: '座標', addr: `${cp[0]}, ${cp[1]}`, lat: cp[0], lng: cp[1], raw: true }]; st.textContent = ''; draw(); go(0); return;
       }
+      const sc = over || Store.state.settings.scope;
       st.textContent = '⏳ 查詢中…'; ul.innerHTML = '';
       try {
-        const b = map.getBounds();
-        const j = await Geo.json(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=8&addressdetails=1&accept-language=zh-TW,zh,en&q=${encodeURIComponent(v)}&viewbox=${b.getWest()},${b.getNorth()},${b.getEast()},${b.getSouth()}`);
-        results = j.map(r => ({ name: String(r.name || r.display_name.split(',')[0]).trim(), addr: r.display_name, lat: +r.lat, lng: +r.lon }));
-        st.textContent = results.length ? `找到 ${results.length} 筆（可再輸入更完整的地址縮小範圍）` : '找不到，試試更完整的地址或換個關鍵字';
-        draw(); if (results.length) go(0);
+        let found = await nom(v, sc), fuzzy = false;
+        if (!found.length) {   // 先模糊比對（Nominatim 限制約每秒 1 次，故間隔 1.1 秒）
+          const vs = variants(v).slice(1);
+          for (let i = 0; i < vs.length && !found.length; i++) {
+            st.textContent = `🔍 查無完全相符，模糊比對中…（${i + 1}/${vs.length}）`;
+            await new Promise(r => setTimeout(r, 1100));
+            found = await nom(vs[i], sc); fuzzy = found.length > 0;
+          }
+        }
+        results = found; draw();
+        if (results.length) { st.textContent = `找到 ${results.length} 筆${fuzzy ? '（模糊比對結果，請確認是否正確）' : ''}｜範圍：${scopeLabel(sc)}`; go(0); return; }
+        st.textContent = `在「${scopeLabel(sc)}」內查無資料（已做模糊比對）。`;
+        const wider = widerScope(sc);
+        if (wider) {
+          askBox._wider = wider;
+          askBox.innerHTML = `<div class="hrsbox">要把查詢範圍擴大到「${esc(scopeLabel(wider))}」再查一次嗎？<div class="row" style="margin-top:6px"><button type="button" class="primary" data-a="once">只這次擴大</button><button type="button" data-a="save">擴大並存為預設</button><button type="button" data-a="no">不用了</button></div></div>`;
+        }
       } catch (e) { st.textContent = '❌ 查詢失敗或逾時，請稍後再試。'; }
     };
-    $('#qGo', el).onclick = run;
-    qIn.addEventListener('keydown', e => { if (e.key === 'Enter') run(); });
+    askBox.onclick = e => {
+      const a = e.target.dataset.a; if (!a) return;
+      const w = askBox._wider; askBox.innerHTML = '';
+      if (a === 'no' || !w) return;
+      if (a === 'save') { Store.state.settings.scope = { ...w }; Store.save(); showScope(); }
+      run(w);
+    };
+    $('#qGo', el).onclick = () => run();
+    qIn.addEventListener('keydown', e => { if (e.key === 'Enter') run(); });   // 不帶參數：使用設定中的範圍
     ul.onclick = e => {
       const li = e.target.closest('li[data-i]'); if (!li) return;
       const i = +li.dataset.i, r = results[i], a = e.target.dataset.a;
@@ -845,6 +925,8 @@ const PRESETS = [
     q: ['["amenity"="pharmacy"]'], match: t => t.amenity === 'pharmacy' },
   { id: 'toilets', label: '廁所', emoji: '🚻', color: '#475569', cat: 'toilet',
     q: ['["amenity"="toilets"]'], match: t => t.amenity === 'toilets' },
+  { id: 'shopee', label: '蝦皮店到店（智取店）', emoji: '📦', color: '#ee4d2d', cat: 'shopee', opt: true,
+    q: ['["name"~"蝦皮|Shopee",i]', '["brand"~"蝦皮|Shopee",i]', '["operator"~"蝦皮|Shopee",i]'], match: t => /蝦皮|shopee/i.test((t.name || '') + (t.brand || '') + (t.operator || '')) },
   { id: 'ubike', label: 'YouBike（ubike）', emoji: '🚲', color: '#f97316', cat: 'ubike', transit: true,
     q: ['["amenity"="bicycle_rental"]'], match: t => t.amenity === 'bicycle_rental' },
   { id: 'mrt', label: '捷運站', emoji: '🚇', color: '#2563eb', cat: 'mrt', transit: true,
@@ -877,7 +959,7 @@ UI.addTab({
     const R = q('#nR'), catSel = q('#nCat'), st = q('#nSt'), ul = q('#nList'), plSel = q('#nPlace');
     const layer = L.layerGroup().addTo(map), cLayer = L.layerGroup().addTo(map);
     let center = null, results = [], tried = false;
-    catSel.innerHTML = '<option value="all">全部（不含交通）</option>' + PRESETS.map(p => `<option value="${p.id}">${p.emoji} ${p.label}</option>`).join('');
+    catSel.innerHTML = '<option value="all">全部（不含交通、蝦皮）</option>' + PRESETS.map(p => `<option value="${p.id}">${p.emoji} ${p.label}</option>`).join('');
     R.value = Store.state.settings.searchRadiusKm; q('#nRv').textContent = R.value;
 
     const drawCenter = () => {
@@ -903,7 +985,7 @@ UI.addTab({
     this.onShow = () => { if (!center && !tried) { tried = true; useGps(false); } };   // 第一次進入「附近」自動使用目前 GPS
 
     const toMarker = r => ({ name: r.name, catId: r.p.cat, rating: 0, note: r.phone ? '電話：' + r.phone : '', lat: r.lat, lng: r.lng, addr: r.addr, hours: r.hours, src: 'osm', osmId: r.osmId });
-    const addMany = rs => { rs.forEach(r => ensurePresetCat(r.p)); const x = Markers.addMany(rs.map(toMarker)); toast(`已加入 ${x.n} 筆` + (x.dup ? `，略過重複 ${x.dup} 筆` : '')); };
+    const addMany = rs => { rs.forEach(r => ensurePresetCat(r.p)); const bid = 'b_' + uid(), bn = `附近搜尋：${rs.length === 1 ? rs[0].p.label : (catSel.value === 'all' ? '多類別' : rs[0].p.label)}（${fmtDate(Date.now())}）`; const x = Markers.addMany(rs.map(r => ({ ...toMarker(r), batch: bid, batchName: bn }))); toast(`已加入 ${x.n} 筆` + (x.dup ? `，略過重複 ${x.dup} 筆` : '')); };
     const popupFor = r => {
       const d = document.createElement('div'); d.className = 'pp';
       d.innerHTML = `<h3>${esc(r.p.emoji)} ${esc(r.name)}</h3><div class="muted">${esc(r.p.label)}｜距中心 ${fmtDist(r.dist)}</div>
@@ -921,7 +1003,7 @@ UI.addTab({
     q('#nGo').onclick = async () => {
       if (!center) return toast('請先設定中心點（目前 GPS、地圖點選或常用地點）');
       Store.state.settings.searchRadiusKm = +R.value; Store.save();
-      const sel = catSel.value === 'all' ? PRESETS.filter(p => !p.transit) : PRESETS.filter(p => p.id === catSel.value);
+      const sel = catSel.value === 'all' ? PRESETS.filter(p => !p.transit && !p.opt) : PRESETS.filter(p => p.id === catSel.value);
       const rad = Math.round(R.value * 1000), parts = [];
       sel.forEach(p => p.q.forEach(c => parts.push(`nwr(around:${rad},${center.lat},${center.lng})${c};`)));
       clear(); drawCenter();
@@ -936,18 +1018,18 @@ UI.addTab({
         results.forEach(r => {
           L.marker([r.lat, r.lng], { icon: Cats.icon(r.p), title: r.name }).bindPopup(() => popupFor(r)).addTo(layer);
         });
-        st.textContent = results.length ? `找到 ${results.length} 個地點${results.length >= 400 ? '（已達上限 400，請縮小半徑）' : ''}（資料來自 OpenStreetMap，可能不完整）` : '範圍內沒有找到，試試放大半徑或換分類';
+        st.textContent = results.length ? `找到 ${results.length} 個地點${results.length >= 400 ? '（已達上限 400，請縮小半徑）' : ''}（資料來自 OpenStreetMap，可能不完整${catSel.value === 'shopee' ? '；蝦皮店到店在 OSM 的標註很少，查不齊時可改用「匯入」清單' : ''}）` : '範圍內沒有找到，試試放大半徑或換分類';
         ul.innerHTML = results.slice(0, 100).map((r, i) => `<li data-i="${i}"><span class="ic">${esc(r.p.emoji)}</span><div><div class="t">${esc(r.name)}</div>
           <div class="muted">${esc(r.p.label)}｜${fmtDist(r.dist)}${r.hours ? '｜🕒 ' + esc(r.hours) : ''}</div></div></li>`).join('');
         if (results.length) { const b = q('#nAll'); b.style.display = ''; b.textContent = `＋ 全部加入我的標記（${results.length}）`; }
-        if (results.length) map.fitBounds(L.latLngBounds([[center.lat, center.lng], ...results.map(r => [r.lat, r.lng])]).pad(.1));
+        // 不自動縮放／移動地圖：維持查詢前的畫面與縮放比例
       } catch (e) { st.textContent = '❌ 查詢失敗或逾時（Overpass 伺服器忙碌），請稍後再試或縮小半徑／分類。'; }
       q('#nGo').disabled = false;
     };
     ul.onclick = e => {
       const li = e.target.closest('li[data-i]'); if (!li) return;
       const r = results[+li.dataset.i];
-      map.flyTo([r.lat, r.lng], Math.max(map.getZoom(), 17));
+      map.flyTo([r.lat, r.lng], map.getZoom());
       setTimeout(() => L.popup().setLatLng([r.lat, r.lng]).setContent(popupFor(r)).openOn(map), 900);
     };
     this.refresh = () => {
@@ -1085,8 +1167,9 @@ UI.addTab({
           const f = Store.state.categories.find(c => c.name === n || c.id === n);
           return f ? f.id : Cats.ensure({ id: 'c_' + uid(), name: n, emoji: '📍', color: '#0ea5e9' }).id;
         };
+        const bid = 'b_' + uid(), bname = `匯入：${name}（${fmtDate(Date.now())}）`;
         const list = rows.map(r => ({
-          name: r.name, rating: r.rating, note: r.note, lat: r.lat, lng: r.lng, addr: r.addr, hours: r.hours, src: 'import',
+          name: r.name, rating: r.rating, note: r.note, lat: r.lat, lng: r.lng, addr: r.addr, hours: r.hours, src: 'import', batch: bid, batchName: bname,
           catId: sel === '__file__' ? (r.catName ? byName(r.catName) : 'other') : sel === '__new__' ? newId : sel
         }));
         const x = Markers.addMany(list, { dedupe: $('#iDup', pv).checked });
@@ -1168,6 +1251,11 @@ UI.addTab({
       <label>預設縮放級別：<b id="sZv"></b><input type="range" id="sZ" min="3" max="19"></label>
       <div class="row" style="margin-bottom:12px"><button id="sZcur">使用目前地圖縮放</button><button id="sGo">套用並前往預設位置</button></div>
       <label>附近搜尋預設半徑（公里，0.1～5）<input type="number" id="sR" min="0.1" max="5" step="0.1"></label>
+      <div class="hrsbox"><b>🌏 查詢範圍限制（用於「查詢」）</b>
+        <div class="muted" style="margin:4px 0 8px">先限制國家，再限制區域，避免搜尋結果跑到別的國家。查無資料時會先模糊比對，再詢問是否擴大範圍。區域邊界為粗略範圍。</div>
+        <label>國家<select id="sCtry"></select></label>
+        <label>區域<select id="sReg"></select></label>
+        <button type="button" id="sBox">把目前地圖畫面存為自訂區域</button></div>
       <label>長按地圖新增標記的時間（秒，0.4～2）<input type="number" id="sLp" min="0.4" max="2" step="0.1"></label>
       <label style="display:flex;gap:6px;align-items:center;color:var(--fg)"><input type="checkbox" id="sGeo" style="width:auto;margin:0"> 點擊地圖新增標記時，自動查詢地名（Nominatim）</label>
       <p class="muted">地圖右下角的＋－與滑桿可隨時手動調整縮放。GPS 定位需要 https 或 localhost。</p>`;
@@ -1186,8 +1274,20 @@ UI.addTab({
     q('#sGo').onclick = () => { if (!goDefault(false)) toast('目前設定為「上次位置」，沒有預設位置可前往'); };
     rr.onchange = () => { S().searchRadiusKm = Math.min(5, Math.max(0.1, +rr.value || 2)); save(); fill(); };
     geo.onchange = () => { S().autoGeocode = geo.checked; save(); };
+    const cSel = q('#sCtry'), rSel = q('#sReg');
+    const fillScope = () => {
+      const sc = S().scope || (S().scope = { country: 'tw', region: '' });
+      cSel.innerHTML = Object.entries(SCOPES).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('') + '<option value="">不限國家（全世界）</option>';
+      cSel.value = sc.country;
+      const regs = (SCOPES[sc.country] || {}).regions || {};
+      rSel.innerHTML = '<option value="">全境（不限區域）</option>' + Object.entries(regs).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('') + (S().scopeBox ? '<option value="custom">自訂：已儲存的地圖範圍</option>' : '');
+      rSel.value = sc.region;
+    };
+    cSel.onchange = () => { S().scope = { country: cSel.value, region: '' }; save(); fillScope(); };
+    rSel.onchange = () => { S().scope = { country: cSel.value, region: rSel.value }; save(); };
+    q('#sBox').onclick = () => { const b = map.getBounds(); S().scopeBox = [b.getWest(), b.getNorth(), b.getEast(), b.getSouth()]; S().scope = { country: cSel.value, region: 'custom' }; save(); fillScope(); toast('已把目前地圖畫面存為自訂查詢範圍'); };
     lp.onchange = () => { S().longPressMs = Math.round(Math.min(2, Math.max(0.4, +lp.value || 0.7)) * 1000); save(); fill(); };
-    this.refresh = fill; fill();
+    this.refresh = () => { fill(); fillScope(); }; this.refresh();
   }
 });
 
@@ -1199,9 +1299,32 @@ UI.addTab({
       <div class="row" style="margin-bottom:14px"><button class="primary" id="exp">⬇️ 匯出 JSON</button></div>
       <label>匯入 JSON 檔<input type="file" id="imp" accept="application/json,.json"></label>
       <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="ovr" style="width:auto;margin:0"> 覆蓋現有資料（預設為合併，相同 ID 以匯入為準）</label>
+      <h4>🧹 移除匯入／附近搜尋加入的標記</h4><div class="muted">依每次匯入或「加入我的標記」分批列出，可整批移除（建議先匯出備份）。</div><ul class="items" id="bat"></ul>
       <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
       <button class="danger" id="clr">🗑️ 清除全部資料</button>`;
     $('#exp', el).onclick = () => Store.exportJSON();
+    const bat = $('#bat', el);
+    const drawBat = () => {
+      const g = new Map();
+      Store.state.markers.forEach(m => {
+        let key = '', label = '';
+        if (m.batch) { key = 'b:' + m.batch; label = m.batchName || '匯入批次'; }
+        else if (m.src === 'import' || m.src === 'osm') { const c = Cats.get(m.catId); key = 's:' + m.src + ':' + m.catId; label = (m.src === 'import' ? '匯入（舊紀錄，依分類）' : '附近搜尋加入（舊紀錄，依分類）') + '：' + c.emoji + ' ' + c.name; }
+        if (!key) return;
+        const e = g.get(key) || { key, label, ids: [] }; e.ids.push(m.id); g.set(key, e);
+      });
+      bat._g = g;
+      bat.innerHTML = [...g.values()].map(e => `<li class="wrap" data-k="${esc(e.key)}"><div style="flex:1"><div class="t">${esc(e.label)}</div><div class="muted">${e.ids.length} 筆</div></div><div class="btns"><button type="button" class="danger" data-a="rm">移除這批</button></div></li>`).join('')
+        || '<li class="muted" style="cursor:default">目前沒有匯入或附近搜尋加入的標記。</li>';
+    };
+    bat.onclick = e => {
+      const li = e.target.closest('li[data-k]'); if (!li || e.target.dataset.a !== 'rm') return;
+      const grp = bat._g.get(li.dataset.k); if (!grp) return;
+      if (!confirm(`移除「${grp.label}」共 ${grp.ids.length} 筆標記？\n此動作無法復原，建議先匯出備份。（你手動編輯過的標記也會一併移除）`)) return;
+      const set = new Set(grp.ids);
+      Store.state.markers = Store.state.markers.filter(m => !set.has(m.id)); Store.save(); Bus.emit('data:changed'); toast(`已移除 ${set.size} 筆`);
+    };
+    this.refresh = drawBat; drawBat();
     $('#imp', el).onchange = async e => {
       const f = e.target.files[0]; if (!f) return;
       try {
@@ -1224,7 +1347,7 @@ UI.addTab({
   init(el) {
     el.innerHTML = `<p class="muted">較少使用的功能收在這裡，避免干擾畫面。</p>
       <ul class="items">
-        <li data-go="coord"><span class="ic">🔎</span><div><div class="t">查詢</div><div class="muted">輸入地址或名稱找地點並新增標記；也可用座標新增</div></div></li>
+        <li data-go="cats"><span class="ic">🏷️</span><div><div class="t">分類</div><div class="muted">標記清單、搜尋，以及分類圖示／順序編輯</div></div></li>
         <li data-go="import"><span class="ic">📁</span><div><div class="t">匯入</div><div class="muted">匯入 CSV／JSON／GeoJSON（例：加油站、全聯清單）或備份檔</div></div></li>
         <li data-go="data"><span class="ic">💾</span><div><div class="t">資料</div><div class="muted">匯出備份、還原、清除全部資料</div></div></li>
       </ul>`;
