@@ -40,6 +40,7 @@ label>input,label>select,label>textarea{margin-top:3px;font-size:14px;color:var(
 .catrow{display:grid;grid-template-columns:52px 1fr 40px 32px;gap:6px;margin-bottom:6px;align-items:center}
 .catrow input[type=color]{padding:0;height:34px}
 .pin{background:none;border:0}
+.rpin{width:26px;height:26px;border-radius:50%;color:#fff;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;box-shadow:0 1px 5px rgba(0,0,0,.5)}
 dialog{max-height:92vh;overflow:auto}
 .zoombox{display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--bg);color:var(--fg);border-radius:8px;box-shadow:0 1px 5px rgba(0,0,0,.35)}
 .zoombox{gap:4px}
@@ -708,7 +709,7 @@ const UI = {
   addTab(t) {
     const pane = document.createElement('div'); pane.className = 'pane'; pane.id = 'pane-' + t.id;
     if (t.parent) {
-      const bar = document.createElement('div'); bar.className = 'backbar'; bar.innerHTML = '<button type="button">← 更多</button>';
+      const bar = document.createElement('div'); bar.className = 'backbar'; bar.innerHTML = '<button type="button">← ' + (t.backLabel || '更多') + '</button>';
       bar.firstChild.onclick = () => this.show(t.parent); pane.appendChild(bar);
     }
     const body = document.createElement('div'); pane.appendChild(body);
@@ -819,12 +820,13 @@ UI.addTab({
     el.innerHTML = `<p class="muted">輸入地址、地名或店名（例：台北101、忠孝東路四段），也可直接輸入座標「25.03, 121.56」。結果來自 OpenStreetMap（Nominatim）。</p>
       <div class="row" style="flex-wrap:nowrap;margin-bottom:8px"><input id="qIn" type="search" placeholder="輸入地址或名稱…" style="flex:1"><button class="primary" id="qGo" type="button">查詢</button></div>
       <div class="muted" id="qScope"></div><div class="muted" id="qSt"></div><div id="qAsk"></div><ul class="items" id="qList"></ul>
+      <div class="row" style="margin:8px 0"><button type="button" id="qFav">⭐ 常用地點</button></div>
       <details style="margin-top:12px"><summary>📌 以座標新增標記</summary><div id="qForm" style="margin-top:8px"></div></details>`;
     const qIn = $('#qIn', el), st = $('#qSt', el), ul = $('#qList', el), qLayer = L.layerGroup().addTo(map);
     let results = [], refName = '';
     const draw = () => {
       ul.innerHTML = results.map((r, i) => `<li class="wrap" data-i="${i}"><span class="ic">📍</span><div style="flex:1"><div class="t">${esc(r.name)}</div><div class="muted">${r.dist != null ? '📏 ' + fmtDist(r.dist) + '｜' : ''}${esc(r.addr)}</div></div>
-        <div class="btns"><button type="button" data-a="go">前往</button><button type="button" data-a="add">＋ 新增標記</button><button type="button" data-a="fav">⭐ 常用</button></div></li>`).join('');
+        <div class="btns"><button type="button" data-a="go">前往</button><button type="button" data-a="nav">🧭 導航</button><button type="button" data-a="add">＋ 新增標記</button><button type="button" data-a="fav">⭐ 常用</button></div></li>`).join('');
     };
     const go = i => {
       const r = results[i]; if (!r) return;
@@ -899,6 +901,7 @@ UI.addTab({
       const li = e.target.closest('li[data-i]'); if (!li) return;
       const i = +li.dataset.i, r = results[i], a = e.target.dataset.a;
       if (a === 'add') Form.openNew({ lat: r.lat, lng: r.lng }, { name: r.raw ? '' : r.name, addr: r.raw ? '' : r.addr });
+      else if (a === 'nav') Hooks.navigateTo({ lat: r.lat, lng: r.lng, name: r.raw ? r.addr : r.name });
       else if (a === 'fav') Places.add({ name: r.raw ? r.addr : r.name, lat: r.lat, lng: r.lng });
       else go(i);
     };
@@ -907,7 +910,333 @@ UI.addTab({
       box.appendChild(buildForm({ catId: 'food', pick: true, submitText: '新增標記', onSubmit: d => { const m = Markers.add(d); toast('已新增'); Markers.focus(m.id); mount(); } }));
     };
     mount();
-    this.refresh = () => { const s = $('select[name=cat]', el); if (s) { const v = s.value; s.innerHTML = Cats.options(v); s.value = v; } };
+    const favBtn = $('#qFav', el); favBtn.onclick = () => UI.show('places');
+    this.refresh = () => { favBtn.textContent = `⭐ 常用地點（${Store.state.places.length}）`; const s = $('select[name=cat]', el); if (s) { const v = s.value; s.innerHTML = Cats.options(v); s.value = v; } };
+  }
+});
+
+/* ---------------- Router：OSRM 路線規劃（階段三）----------------
+ * 預設使用 OpenStreetMap 德國社群的免費 OSRM（開車／自行車／步行各有獨立路網）。
+ * 想換成自架或其他 OSRM：在匯出的 JSON 或程式中設定 settings.routeBase，例如
+ *   'https://你的伺服器/route/v1/driving/'（可用 {p} 代入 routed-car / routed-bike / routed-foot）。
+ * 路線資料以 [[lat,lng],…] 折線儲存，階段四的控制點拖曳與軌跡回放直接沿用。 */
+const Router = {
+  PROFILES: {
+    driving: { label: '🚗 開車', path: 'routed-car' },
+    cycling: { label: '🚲 自行車', path: 'routed-bike' },
+    walking: { label: '🚶 步行', path: 'routed-foot' }
+  },
+  DEFAULT_BASE: 'https://routing.openstreetmap.de/{p}/route/v1/driving/',
+  base(profile) { return (Store.state.settings.routeBase || this.DEFAULT_BASE).replace('{p}', this.PROFILES[profile].path); },
+  async route(profile, pts) {
+    const coords = pts.map(p => (+p.lng).toFixed(6) + ',' + (+p.lat).toFixed(6)).join(';');
+    const url = this.base(profile) + coords + '?overview=full&geometries=geojson&steps=true&alternatives=false';
+    const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 20000);
+    let r;
+    try { r = await fetch(url, { signal: ac.signal }); }
+    catch (e) { throw new Error(ac.signal.aborted ? '路線伺服器回應逾時，請稍後再試' : '無法連線到路線伺服器（請確認網路；若持續失敗，可能是伺服器不允許網頁直接連線）'); }
+    finally { clearTimeout(timer); }
+    let j = null; try { j = await r.json(); } catch (e) {}
+    if (!r.ok || !j || j.code !== 'Ok' || !j.routes || !j.routes[0]) {
+      const c = j && j.code;
+      if (c === 'NoRoute') throw new Error('找不到可行路線（起終點之間可能沒有道路相連，例如隔海；或所選交通方式不能通行）');
+      if (c === 'NoSegment') throw new Error('起點或終點附近找不到道路，請把點移到道路附近');
+      if (c === 'TooBig') throw new Error('路線太長或中途點太多，伺服器無法處理');
+      if (r.status === 429) throw new Error('路線伺服器忙碌（請求過於頻繁），請稍後再試');
+      throw new Error('路線規劃失敗（' + (c || ('HTTP ' + r.status)) + '）');
+    }
+    const rt = j.routes[0], steps = [];
+    rt.legs.forEach((leg, li) => (leg.steps || []).forEach(s => steps.push({
+      leg: li, type: s.maneuver.type, mod: s.maneuver.modifier || '', name: s.name || '', ref: s.ref || '',
+      dist: s.distance, dur: s.duration, loc: [s.maneuver.location[1], s.maneuver.location[0]], exit: s.maneuver.exit || 0
+    })));
+    return { geometry: rt.geometry.coordinates.map(c => [c[1], c[0]]), distance: rt.distance, duration: rt.duration, steps };
+  }
+};
+const fmtDur = s => {
+  const m = Math.round(s / 60); if (m < 1) return '不到 1 分鐘';
+  const h = Math.floor(m / 60); return h ? `${h} 小時 ${m % 60} 分` : `${m} 分鐘`;
+};
+/* 轉彎指引：OSRM 的 maneuver 轉成中文 */
+const STEP_DIR = { left: '左轉', right: '右轉', 'slight left': '稍向左轉', 'slight right': '稍向右轉', 'sharp left': '急左轉', 'sharp right': '急右轉', straight: '直行', uturn: '迴轉' };
+const STEP_ICON = { left: '⬅️', right: '➡️', 'slight left': '↖️', 'slight right': '↗️', 'sharp left': '↙️', 'sharp right': '↘️', straight: '⬆️', uturn: '↩️' };
+function stepInfo(s, lastLeg, viaLetter) {
+  const road = s.name || s.ref || '', on = road ? `「${road}」` : '', d = STEP_DIR[s.mod] || '', side = s.mod === 'left' ? '左側' : s.mod === 'right' ? '右側' : '';
+  let t, ic = STEP_ICON[s.mod] || '⬆️';
+  switch (s.type) {
+    case 'depart': t = `${s.leg > 0 ? '從中途點 ' + String.fromCharCode(viaLetter.charCodeAt(0) - 1) + ' ' : ''}出發${road ? '，沿' + on + '前進' : ''}`; ic = '🟢'; break;
+    case 'arrive': ic = '🏁'; t = s.leg < lastLeg ? `抵達中途點 ${viaLetter}${side ? '（' + side + '）' : ''}` : `抵達目的地${side ? '（在' + side + '）' : ''}`; break;
+    case 'turn': t = `${d || '轉彎'}${road ? '，進入' + on : ''}`; break;
+    case 'end of road': t = `道路盡頭${d || '轉彎'}${road ? '，進入' + on : ''}`; break;
+    case 'new name': t = `繼續沿${on || '道路'}前進`; break;
+    case 'continue': t = s.mod === 'uturn' ? '迴轉' : `${d && s.mod !== 'straight' ? d : '繼續直行'}${road ? '，沿' + on : ''}`; break;
+    case 'merge': t = `匯入${on || '主線車道'}`; break;
+    case 'on ramp': t = `${d ? d + '，' : ''}上匝道${road ? '往' + on : ''}`; ic = '🛣️'; break;
+    case 'off ramp': t = `${d ? d + '，' : ''}下匝道${road ? '往' + on : ''}`; ic = '🛣️'; break;
+    case 'fork': t = `在岔路${s.mod.includes('left') ? '靠左' : s.mod.includes('right') ? '靠右' : '直行'}${road ? '，進入' + on : ''}`; break;
+    case 'roundabout': case 'rotary': t = `進入圓環${s.exit ? '，從第 ' + s.exit + ' 個出口離開' : ''}${road ? '，往' + on : ''}`; ic = '🔄'; break;
+    case 'roundabout turn': t = `在圓環${d || '轉彎'}${road ? '，進入' + on : ''}`; break;
+    case 'exit roundabout': case 'exit rotary': t = `離開圓環${road ? '，進入' + on : ''}`; ic = '🔄'; break;
+    default: t = `${d || '繼續前進'}${road ? '，沿' + on : ''}`;
+  }
+  return { t, ic };
+}
+/* 沿途測速照相：找出距離路線 maxM 公尺內、有速限或屬測速分類的標記，依路線前進順序排列 */
+function camsAlong(geom, maxM = 50) {
+  const cams = Store.state.markers.filter(m => m.speedLimit > 0 || m.catId === 'speedcam');
+  if (!cams.length || geom.length < 2) return [];
+  let a = 90, b = -90, c = 180, d = -180;
+  geom.forEach(p => { if (p[0] < a) a = p[0]; if (p[0] > b) b = p[0]; if (p[1] < c) c = p[1]; if (p[1] > d) d = p[1]; });
+  const pad = 0.001, cand = cams.filter(m => m.lat >= a - pad && m.lat <= b + pad && m.lng >= c - pad && m.lng <= d + pad);
+  if (!cand.length) return [];
+  const rad = Math.PI / 180, kx = Math.cos(((a + b) / 2) * rad) * 111320, ky = 110540;
+  const cum = [0];
+  for (let i = 1; i < geom.length; i++) cum[i] = cum[i - 1] + Math.hypot((geom[i][1] - geom[i - 1][1]) * kx, (geom[i][0] - geom[i - 1][0]) * ky);
+  const out = [];
+  for (const m of cand) {
+    let best = Infinity, at = 0;
+    for (let i = 0; i < geom.length - 1; i++) {
+      const ax = (geom[i][1] - m.lng) * kx, ay = (geom[i][0] - m.lat) * ky;
+      const dx = (geom[i + 1][1] - geom[i][1]) * kx, dy = (geom[i + 1][0] - geom[i][0]) * ky;
+      const L2 = dx * dx + dy * dy;
+      let t = L2 ? -(ax * dx + ay * dy) / L2 : 0; t = Math.max(0, Math.min(1, t));
+      const dist = Math.hypot(ax + t * dx, ay + t * dy);
+      if (dist < best) { best = dist; at = cum[i] + t * Math.sqrt(L2); }
+    }
+    if (best <= maxM) out.push({ m, off: best, at });
+  }
+  return out.sort((x, y) => x.at - y.at);
+}
+
+/* --- 分頁：路線 --- */
+UI.addTab({
+  id: 'route', label: '🧭 路線',
+  init(el) {
+    el.innerHTML = `<div class="seg" id="rProf"></div>
+      <div id="rPts"></div>
+      <div class="row" style="margin:6px 0 8px"><button type="button" id="rAdd">＋ 加中途點</button><button type="button" id="rSwap">⇅ 起終點互換</button><button type="button" id="rClear" class="danger">🗑️ 清除路線</button></div>
+      <div id="rCh" class="hrsbox" style="display:none"></div>
+      <div class="muted" id="rSt"></div>
+      <div id="rSum"></div><div id="rCams"></div><div id="rSteps"></div>
+      <h4>已儲存路線</h4><ul class="items" id="rSaved"></ul>`;
+    const R = { profile: 'driving', pts: [null, null], route: null, tok: 0 };
+    const lineLayer = L.layerGroup().addTo(map), ptLayer = L.layerGroup().addTo(map), camLayer = L.layerGroup().addTo(map);
+    const stepsBox = $('#rSteps', el), stepLayer = L.layerGroup().addTo(map), st = $('#rSt', el), sum = $('#rSum', el), camBox = $('#rCams', el), ptsBox = $('#rPts', el), chBox = $('#rCh', el);
+    const letter = i => String.fromCharCode(65 + i);
+    const label = i => i === 0 ? '起點' : i === R.pts.length - 1 ? '終點' : '中途點 ' + i;
+
+    /* 交通方式 */
+    const prof = $('#rProf', el);
+    prof.innerHTML = Object.entries(Router.PROFILES).map(([k, v]) => `<button type="button" data-v="${k}">${v.label}</button>`).join('');
+    const markProf = () => prof.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === R.profile));
+    prof.onclick = e => { const v = e.target.dataset.v; if (!v || v === R.profile) return; R.profile = v; markProf(); plan(); };
+    markProf();
+
+    /* 起終點列 */
+    const drawPts = () => {
+      ptsBox.innerHTML = R.pts.map((p, i) => `<div class="row" style="flex-wrap:nowrap;margin-bottom:6px" data-i="${i}">
+        <b style="width:24px;height:24px;border-radius:50%;background:${i === 0 ? '#16a34a' : i === R.pts.length - 1 ? '#dc2626' : '#2563eb'};color:#fff;display:flex;align-items:center;justify-content:center;flex:none;margin-top:4px">${letter(i)}</b>
+        <button type="button" data-a="set" style="flex:1;min-width:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p ? esc(p.name) : `<span class="muted">點此設定${label(i)}…</span>`}</button>
+        ${R.pts.length > 2 ? `<button type="button" data-a="up" ${i === 0 ? 'disabled' : ''} style="padding:5px 8px">↑</button><button type="button" data-a="down" ${i === R.pts.length - 1 ? 'disabled' : ''} style="padding:5px 8px">↓</button>${i > 0 && i < R.pts.length - 1 ? '<button type="button" data-a="del" class="danger" style="padding:5px 8px">✕</button>' : ''}` : ''}</div>`).join('');
+      $('#rAdd', el).disabled = R.pts.length >= 8;
+      ptLayer.clearLayers();
+      R.pts.forEach((p, i) => {
+        if (!p) return;
+        const col = i === 0 ? '#16a34a' : i === R.pts.length - 1 ? '#dc2626' : '#2563eb';
+        L.marker([p.lat, p.lng], { icon: L.divIcon({ className: 'pin', html: `<div class="rpin" style="background:${col}">${letter(i)}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] }), interactive: false, keyboard: false }).addTo(ptLayer);
+      });
+    };
+    ptsBox.onclick = e => {
+      const row = e.target.closest('[data-i]'), b = e.target.closest('button[data-a]'); if (!row || !b || b.disabled) return;
+      const i = +row.dataset.i, a = b.dataset.a;
+      if (a === 'set') return openCh(i);
+      chI = -1; renderCh();
+      if (a === 'del') R.pts.splice(i, 1);
+      else { const j = a === 'up' ? i - 1 : i + 1; if (j < 0 || j >= R.pts.length) return; [R.pts[i], R.pts[j]] = [R.pts[j], R.pts[i]]; }
+      drawPts(); plan();
+    };
+    $('#rAdd', el).onclick = () => { if (R.pts.length >= 8) return; R.pts.splice(R.pts.length - 1, 0, null); drawPts(); openCh(R.pts.length - 2); };
+
+    const setPoint = (i, p) => {
+      R.pts[i] = { lat: +p.lat, lng: +p.lng, name: p.name || `${(+p.lat).toFixed(5)}, ${(+p.lng).toFixed(5)}`, ref: p.ref || '' };
+      chI = -1; renderCh(); drawPts(); plan();
+    };
+
+    /* 選擇起終點：GPS／地圖點選／常用地點／已存標記／搜尋 */
+    let chI = -1, nomRes = [], items = [];
+    const renderCh = () => {
+      if (chI < 0) { chBox.style.display = 'none'; chBox.innerHTML = ''; return; }
+      chBox.style.display = '';
+      chBox.innerHTML = `<div class="muted" style="margin-bottom:6px">設定「${esc(label(chI))}」</div>
+        <div class="row" style="margin-bottom:6px"><button type="button" data-a="gps">🛰️ 目前 GPS</button><button type="button" data-a="map">📌 地圖點選</button><button type="button" data-a="x">取消</button></div>
+        <div class="row" style="flex-wrap:nowrap;margin-bottom:6px"><input id="rQ" type="search" placeholder="搜尋標記／地址／名稱／座標" style="flex:1"><button type="button" class="primary" data-a="q">搜尋</button></div>
+        <div class="muted" id="rQst"></div><ul class="items" id="rQl"></ul>`;
+      fillList();
+    };
+    const fillList = () => {
+      const inp = $('#rQ', chBox), ul = $('#rQl', chBox); if (!ul) return;
+      const norm = s => String(s || '').replace(/臺/g, '台').toLowerCase(), q = norm(inp.value.trim());
+      const favs = Store.state.places.filter(p => !q || norm(p.name).includes(q));
+      const mks = q ? Store.state.markers.filter(m => norm(m.name + ' ' + m.addr).includes(q)).slice(0, 8) : [];
+      items = [
+        ...favs.map(p => ({ ic: '⭐', name: p.name, sub: '常用地點', lat: p.lat, lng: p.lng })),
+        ...mks.map(m => ({ ic: Cats.get(m.catId).emoji, name: m.name, sub: m.addr || '已存標記', lat: m.lat, lng: m.lng, ref: m.id })),
+        ...nomRes.map(r => ({ ic: '🔎', name: r.name, sub: r.addr, lat: r.lat, lng: r.lng }))
+      ];
+      ul.innerHTML = items.map((x, k) => `<li data-k="${k}"><span class="ic">${esc(x.ic)}</span><div style="min-width:0"><div class="t">${esc(x.name)}</div><div class="muted">${esc(x.sub)}</div></div></li>`).join('')
+        || '<li class="muted" style="cursor:default">沒有符合的項目，可按「搜尋」查地址或名稱</li>';
+    };
+    const openCh = i => { chI = i; nomRes = []; renderCh(); const q = $('#rQ', chBox); if (q) q.focus(); };
+    const searchNom = async () => {
+      const inp = $('#rQ', chBox), qs = $('#rQst', chBox), v = inp.value.trim(); if (!v) return;
+      const cp = parseCoordPair(v);
+      if (cp && /^[-+\d.\s,，]+$/.test(v) && Math.abs(cp[0]) <= 90 && Math.abs(cp[1]) <= 180) return setPoint(chI, { lat: cp[0], lng: cp[1], name: `${cp[0]}, ${cp[1]}` });
+      qs.textContent = '⏳ 查詢中…';
+      try {
+        const { cc, box } = scopeParams(Store.state.settings.scope);
+        let url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=8&accept-language=zh-TW,zh,en&q=${encodeURIComponent(v)}`;
+        if (cc) url += '&countrycodes=' + cc;
+        if (box) url += `&viewbox=${box[0]},${box[1]},${box[2]},${box[3]}&bounded=1`;
+        const j = await Geo.json(url), ref = App.me || map.getCenter();
+        nomRes = j.map(r => ({ name: String(r.name || r.display_name.split(',')[0]).trim(), addr: r.display_name, lat: +r.lat, lng: +r.lon }))
+          .map(r => ({ ...r, d: hav(ref, r) })).sort((a, b) => a.d - b.d);
+        qs.textContent = nomRes.length ? `找到 ${nomRes.length} 筆（由近到遠，範圍：${scopeLabel(Store.state.settings.scope)}）` : `在「${scopeLabel(Store.state.settings.scope)}」內查無資料，可到「設定」放寬查詢範圍`;
+        fillList();
+      } catch (e) { qs.textContent = '❌ 查詢失敗或逾時，請稍後再試'; }
+    };
+    chBox.onclick = async e => {
+      const li = e.target.closest('li[data-k]');
+      if (li) { const x = items[+li.dataset.k]; if (x) setPoint(chI, x); return; }
+      const a = e.target.dataset.a; if (!a) return;
+      if (a === 'x') { chI = -1; renderCh(); }
+      else if (a === 'q') searchNom();
+      else if (a === 'map') {
+        const i = chI; chI = -1; renderCh();
+        App.pick = ll => setPoint(i, { lat: ll.lat, lng: ll.lng, name: `地圖選點 ${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}` });
+        toast('請在地圖上單擊選擇' + label(i));
+      } else if (a === 'gps') {
+        const i = chI, qs = $('#rQst', chBox); if (qs) qs.textContent = '📡 定位中…';
+        try { const p = await App.getLocation(); setPoint(i, { lat: p.lat, lng: p.lng, name: '目前位置' }); }
+        catch (err) { const q2 = $('#rQst', chBox); if (q2) q2.textContent = '❌ ' + err.message; }
+      }
+    };
+    chBox.addEventListener('input', e => { if (e.target.id === 'rQ') fillList(); });
+    chBox.addEventListener('keydown', e => { if (e.target.id === 'rQ' && e.key === 'Enter') searchNom(); });
+
+    /* 顯示路線 */
+    const clearDraw = () => { lineLayer.clearLayers(); camLayer.clearLayers(); stepLayer.clearLayers(); sum.innerHTML = ''; camBox.innerHTML = ''; stepsBox.innerHTML = ''; };
+    const showRoute = fit => {
+      clearDraw();
+      const r = R.route; if (!r) return;
+      L.polyline(r.geometry, { color: '#fff', weight: 9, opacity: .9, interactive: false }).addTo(lineLayer);
+      L.polyline(r.geometry, { color: '#2563eb', weight: 5, opacity: .95, interactive: false }).addTo(lineLayer);
+      sum.innerHTML = `<div class="hrsbox"><div style="font-size:17px"><b>${fmtDist(r.distance)}</b>　約 <b>${fmtDur(r.duration)}</b></div>
+        <div class="muted">${esc(Router.PROFILES[R.profile].label)}｜時間為路網估算，${R.profile === 'driving' ? '未含即時路況、紅綠燈與塞車' : '依一般速度估算'}</div>
+        <div class="row" style="margin-top:8px"><button type="button" class="primary" data-a="save">💾 儲存路線</button><button type="button" data-a="redo">🔄 重新規劃</button></div></div>`;
+      drawCams(r); drawSteps(r);
+      if (fit) map.fitBounds(L.latLngBounds(r.geometry), { padding: [30, 30] });
+    };
+    const drawCams = r => {
+      if (R.profile !== 'driving') { camBox.innerHTML = ''; return; }
+      const list = camsAlong(r.geometry, 50);
+      const total = Store.state.markers.filter(m => m.speedLimit > 0 || m.catId === 'speedcam').length;
+      if (!list.length) {
+        camBox.innerHTML = `<div class="muted" style="margin-bottom:8px">📸 ${total ? '沿途 50 m 內沒有已存的測速照相。' : '你的資料裡還沒有測速照相；到「更多 → 匯入」匯入測速執法設置點後，這裡會自動標示沿途測速。'}</div>`;
+        return;
+      }
+      list.forEach(x => L.circleMarker([x.m.lat, x.m.lng], { radius: 9, color: '#e11d48', weight: 3, fillColor: '#fff', fillOpacity: .5, interactive: false }).addTo(camLayer));
+      camBox.innerHTML = `<div class="hrsbox"><b>📸 沿途 ${list.length} 處測速照相</b><span class="muted">（路線兩側 50 m 內，依行進順序；方向請以現場標示為準）</span>
+        <ul class="items">${list.map(x => `<li data-id="${esc(x.m.id)}"><span class="ic">📸</span><div><div class="t">${esc(x.m.name)}</div>
+        <div class="muted">${x.m.speedLimit ? `🚦 速限 ${x.m.speedLimit} km/h｜` : ''}距起點約 ${fmtDist(x.at)}${x.m.dir ? '｜' + esc(x.m.dir) : ''}</div></div></li>`).join('')}</ul></div>`;
+    };
+    let stepList = [];
+    const drawSteps = r => {
+      const lastLeg = R.pts.length - 2;
+      stepList = r.steps || [];
+      if (!stepList.length) { stepsBox.innerHTML = '<div class="muted" style="margin-bottom:8px">🧾 儲存的路線不含轉彎指引，按「🔄 重新規劃」即可取得。</div>'; return; }
+      stepsBox.innerHTML = `<details class="hrsbox"><summary><b>🧾 轉彎指引</b>（${stepList.length} 步，點一步會飛到該路口）</summary><ul class="items">${stepList.map((s, k) => {
+        const x = stepInfo(s, lastLeg, letter(s.leg + 1));
+        return `<li data-k="${k}"><span class="ic">${x.ic}</span><div><div class="t" style="font-weight:500">${esc(x.t)}</div>${s.type !== 'arrive' && s.dist > 0 ? `<div class="muted">接著 ${fmtDist(s.dist)}，約 ${fmtDur(s.dur)}</div>` : ''}</div></li>`; }).join('')}</ul></details>`;
+    };
+    stepsBox.onclick = e => {
+      const li = e.target.closest('li[data-k]'); if (!li) return;
+      const s = stepList[+li.dataset.k]; if (!s) return;
+      stepLayer.clearLayers();
+      L.circleMarker(s.loc, { radius: 11, color: '#fff', weight: 3, fillColor: '#f59e0b', fillOpacity: 1, interactive: false }).addTo(stepLayer);
+      map.flyTo(s.loc, Math.max(map.getZoom(), 18));
+    };
+    camBox.onclick = e => { const li = e.target.closest('li[data-id]'); if (li) Markers.focus(li.dataset.id); };
+    sum.onclick = e => {
+      const a = e.target.dataset.a;
+      if (a === 'redo') plan();
+      else if (a === 'save') saveRoute();
+    };
+
+    /* 規劃 */
+    const plan = async () => {
+      const pts = R.pts;
+      if (pts.length < 2 || pts.some(p => !p)) { R.tok++; R.route = null; clearDraw(); st.textContent = ''; return; }
+      if (hav(pts[0], pts[pts.length - 1]) < 5 && pts.length === 2) { R.tok++; R.route = null; clearDraw(); st.textContent = '起點與終點相同，請換一個地點'; return; }
+      const tok = ++R.tok; st.textContent = '⏳ 規劃路線中…';
+      try {
+        const r = await Router.route(R.profile, pts);
+        if (tok !== R.tok) return;
+        R.route = r; st.textContent = ''; showRoute(true);
+      } catch (e) { if (tok !== R.tok) return; R.route = null; clearDraw(); st.textContent = '❌ ' + e.message; }
+    };
+
+    $('#rSwap', el).onclick = () => { R.pts.reverse(); drawPts(); plan(); };
+    $('#rClear', el).onclick = () => { R.tok++; R.pts = [null, null]; R.route = null; chI = -1; renderCh(); clearDraw(); drawPts(); st.textContent = ''; };
+
+    /* 儲存路線 */
+    const r5 = n => Math.round(n * 1e5) / 1e5;
+    const saveRoute = () => {
+      if (!R.route) return;
+      const p = R.pts, def = `${p[0].name} → ${p[p.length - 1].name}`;
+      const name = prompt('路線名稱', def); if (name === null) return;
+      Store.state.routes.unshift({
+        id: uid(), name: name.trim() || def, profile: R.profile,
+        waypoints: p.map(x => ({ lat: x.lat, lng: x.lng, name: x.name })),
+        geometry: R.route.geometry.map(g => [r5(g[0]), r5(g[1])]),
+        distance: R.route.distance, duration: R.route.duration, createdAt: Date.now()
+      });
+      Store.save(); Bus.emit('data:changed'); toast('已儲存路線');
+    };
+    const saved = $('#rSaved', el);
+    saved.onclick = e => {
+      const li = e.target.closest('li[data-id]'); if (!li) return;
+      const rt = Store.state.routes.find(x => x.id === li.dataset.id); if (!rt) return;
+      const a = e.target.dataset.a;
+      if (a === 'del') { if (confirm(`刪除路線「${rt.name}」？`)) { Store.state.routes = Store.state.routes.filter(x => x.id !== rt.id); Store.save(); Bus.emit('data:changed'); } }
+      else if (a === 'ren') { const n = prompt('路線名稱', rt.name); if (n && n.trim()) { rt.name = n.trim(); Store.save(); Bus.emit('data:changed'); } }
+      else {
+        R.tok++; R.profile = Router.PROFILES[rt.profile] ? rt.profile : 'driving'; markProf();
+        R.pts = rt.waypoints.map(w => ({ lat: w.lat, lng: w.lng, name: w.name || '' }));
+        R.route = { geometry: rt.geometry, distance: rt.distance, duration: rt.duration, steps: [] };
+        chI = -1; renderCh(); drawPts(); st.textContent = ''; showRoute(true);
+      }
+    };
+    this.refresh = () => {
+      saved.innerHTML = Store.state.routes.map(r => `<li class="wrap" data-id="${esc(r.id)}"><span class="ic">🧭</span>
+        <div style="flex:1;min-width:0"><div class="t">${esc(r.name)}</div><div class="muted">${esc((Router.PROFILES[r.profile] || {}).label || '')}｜${fmtDist(r.distance)}｜${fmtDur(r.duration)}｜${fmtDate(r.createdAt)}</div></div>
+        <div class="btns"><button type="button" data-a="show">顯示</button><button type="button" data-a="ren">改名</button><button type="button" class="danger" data-a="del">刪除</button></div></li>`).join('')
+        || '<li class="muted" style="cursor:default">還沒有儲存的路線。</li>';
+    };
+    this.refresh(); drawPts();
+
+    /* 標記彈窗／查詢結果的「導航」：以目前 GPS 為起點、指定地點為終點 */
+    Hooks.navigateTo = async m => {
+      map.closePopup();
+      if (document.body.classList.contains('side-closed')) { document.body.classList.remove('side-closed'); setTimeout(() => map.invalidateSize(), 50); }
+      UI.show('route');
+      R.tok++; R.route = null; clearDraw(); chI = -1; renderCh();
+      R.pts = [null, { lat: m.lat, lng: m.lng, name: m.name || `${(+m.lat).toFixed(5)}, ${(+m.lng).toFixed(5)}`, ref: m.id || '' }];
+      drawPts(); st.textContent = '📡 取得目前位置…';
+      try {
+        const p = await App.getLocation();
+        R.pts[0] = { lat: p.lat, lng: p.lng, name: '目前位置' }; st.textContent = ''; drawPts(); plan();
+      } catch (e) { st.textContent = '❌ ' + e.message + '。請手動選擇起點。'; openCh(0); }
+    };
   }
 });
 
@@ -1144,9 +1473,9 @@ UI.addTab({
       <p><a href="#" id="iSample">⬇️ 下載範例 CSV（看欄位格式）</a></p>`;
     const pv = $('#iPv', el);
     const SOURCES = [   // 日後要新增其他一鍵匯入來源，在這裡加一筆即可
-      { id: 'speedcam', label: '🚦 測速執法設置點（內政部警政署）', desc: '全國固定測速照相，含速限與拍攝方向；預設只勾臺北市/新北市',
+      { id: 'speedcam', label: '🚦 測速執法設置點（內政部警政署）', desc: '全國固定測速照相，含速限與拍攝方向；預設只勾臺北市',
         url: 'https://opdadm.moi.gov.tw/api/v1/no-auth/resource/api/dataset/EA5E6FCD-B82D-43B7-A5CF-E9893253187E/resource/776A91B0-446D-4510-98D8-D52A1FF95562/download',
-        name: '測速執法設置點', opts: { cities: ['臺北市', '新北市'], bn: '測速執法設置點' } }
+        name: '測速執法設置點', opts: { cities: ['臺北市'], bn: '測速執法設置點' } }
     ];
     const getText = async url => {   // 先直接連線；被瀏覽器擋住（CORS）才改走公共轉送服務
       const tries = [[url, ''], ['https://api.allorigins.win/raw?url=' + encodeURIComponent(url), '（經公共轉送服務）'], ['https://corsproxy.io/?' + encodeURIComponent(url), '（經公共轉送服務）']];
@@ -1293,7 +1622,7 @@ UI.addTab({
 
 /* --- 分頁：常用地點 --- */
 UI.addTab({
-  id: 'places', label: '⭐ 常用',
+  id: 'places', label: '⭐ 常用地點', parent: 'coord', backLabel: '查詢', hidden: true,
   init(el) {
     el.innerHTML = `<p class="muted">常用地點可作為開啟地圖的預設位置，也能當附近搜尋的中心。</p>
       <ul class="items" id="plList"></ul>
