@@ -175,18 +175,44 @@ const gLink = (lat, lng) => `https://www.google.com/maps?q=${(+lat).toFixed(6)},
 const llText = ll => `${(+ll.lat).toFixed(6)}, ${(+ll.lng).toFixed(6)}`;
 function coordPopup(title, ll, o = {}) {
   const d = document.createElement('div'); d.className = 'pp';
-  d.innerHTML = `<h3>${esc(title)}</h3><div class="muted">${llText(ll)}${o.acc ? `｜誤差約 ${Math.round(o.acc)} 公尺` : ''}</div>
+  d.innerHTML = `<h3>${esc(title)}</h3><div class="muted" data-r="addr"></div><div class="muted">${llText(ll)}${o.acc ? `｜誤差約 ${Math.round(o.acc)} 公尺` : ''}</div>
     <div class="row"><button data-a="copy">📋 複製座標</button><button data-a="share">📤 分享</button><button data-a="g">🗺️ Google 地圖</button>${o.nav ? '<button class="primary" data-a="nav">🧭 導航到這裡</button>' : ''}${o.add ? '<button data-a="add">＋ 新增標記</button>' : ''}</div>`;
   d.onclick = e => {
     const a = e.target.dataset.a; if (!a) return;
     if (a === 'copy') copyText(llText(ll));
     else if (a === 'share') shareText({ title, text: `${title}\n${llText(ll)}`, url: gLink(ll.lat, ll.lng) });
     else if (a === 'g') window.open(gLink(ll.lat, ll.lng), '_blank', 'noopener');
-    else if (a === 'nav') Hooks.navigateTo({ lat: ll.lat, lng: ll.lng, name: o.name || title });
+    else if (a === 'nav') Hooks.navigateTo({ lat: ll.lat, lng: ll.lng, name: o.name || title, addr: o.addr || '', named: !!o.name });
     else if (a === 'add') { map.closePopup(); Form.openNew({ lat: ll.lat, lng: ll.lng }, { name: o.name || '', addr: o.addr || '' }); }
+  };
+  d.setInfo = (name, addr) => {   // 反查到地名／地址後更新彈窗
+    o.name = name || o.name || ''; o.addr = addr || '';
+    if (name) d.querySelector('h3').textContent = '📍 ' + name;
+    d.querySelector('[data-r=addr]').textContent = addr ? '📮 ' + addr : '';
   };
   return d;
 }
+/* 長按／右鍵地圖任一點：標出該點並顯示座標彈窗（複製、分享、導航、新增標記），並自動反查地址 */
+const Pin = {
+  layer: null, last: null,
+  at(ll) {
+    if (!this.layer) this.layer = L.layerGroup().addTo(map);
+    this.layer.clearLayers();
+    const el = coordPopup('📍 選取的位置', ll, { nav: true, add: true });
+    const mk = L.circleMarker([ll.lat, ll.lng], { radius: 9, color: '#fff', weight: 3, fillColor: '#f97316', fillOpacity: 1 }).addTo(this.layer);
+    mk.bindPopup(el).openPopup();
+    mk.on('popupclose', () => { if (this.layer) this.layer.removeLayer(mk); });
+    this.last = el;
+    if (Store.state.settings.autoGeocode !== false) {
+      Geo.reverse(ll.lat, ll.lng).then(r => {
+        if (!r || this.last !== el) return;
+        const n = String(r.name || (r.namedetails && r.namedetails.name) || '').trim();
+        el.setInfo(n, r.display_name || '');
+      }).catch(() => {});
+    }
+    return el;
+  }
+};
 /* 地圖選點模式：顯示提示列與十字游標，可按「取消」離開 */
 const PickBar = {
   el: null,
@@ -736,7 +762,7 @@ const lpCancel = () => { clearTimeout(LP.t); LP.t = null; };
       LP.fired = Date.now();
       const ll = map.containerPointToLatLng(map.mouseEventToContainerPoint(e));
       if (navigator.vibrate) { try { navigator.vibrate(30); } catch (x) {} }
-      Form.openNew(ll);
+      Pin.at(ll);
     }, ms);
   });
   mc.addEventListener('pointermove', e => { if (LP.t && Math.hypot(e.clientX - LP.x, e.clientY - LP.y) > 10) lpCancel(); });
@@ -749,9 +775,9 @@ map.on('click', e => {
 });
 map.on('contextmenu', e => {   // 電腦右鍵也可新增；若剛由長按觸發則略過
   if (Date.now() - LP.fired < 1200 || App.pick) return;
-  Form.openNew(e.latlng);
+  Pin.at(e.latlng);
 });
-setTimeout(() => toast('提示：長按地圖空白處可新增標記', 3500), 1500);
+setTimeout(() => toast('提示：長按地圖任一處，可複製座標、導航或新增標記', 3500), 1500);
 
 /* ---------------- UI：側邊欄分頁 ---------------- */
 const UI = {
@@ -863,6 +889,83 @@ UI.addTab({
   }
 });
 
+/* ---------------- 地址搜尋（查詢分頁與路線起終點共用）----------------
+ * 流程：Nominatim 原文 → 結構化改寫（路名＋門牌＋行政區，台↔臺）→ Photon（第二資料來源）。
+ * 有門牌時，必須結果地址含該門牌才算「相符」，否則繼續嘗試並標示「門牌未確認」。 */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function parseTwAddr(v) {
+  let s = String(v).replace(/[\s,，]+/g, '').replace(/臺/g, '台'), m; const o = {};
+  if ((m = s.match(/^(.{2,3}?[市縣])/))) { o.city = m[1]; s = s.slice(m[0].length); }
+  if ((m = s.match(/^(.{1,3}?[區鄉鎮市])/))) { o.dist = m[1]; s = s.slice(m[0].length); }
+  if ((m = s.match(/^(.+?(?:路|街|大道))((?:[一二三四五六七八九十]+|\d+)段)?/))) { o.road = m[1]; o.sec = m[2] || ''; s = s.slice(m[0].length); }
+  if ((m = s.match(/(\d+(?:[-之]\d+)?)號/))) o.no = m[1].replace('之', '-');
+  return o;
+}
+const houseHit = (r, no) => new RegExp('(^|[^0-9])' + String(no).replace('-', '[-之]') + '(號|[,，\\s]|$)').test(r.addr || '');
+function addrVariants(v, pa) {
+  const out = [v], add = x => { x = (x || '').replace(/\s+/g, ' ').trim(); if (x && !out.includes(x)) out.push(x); };
+  const tw = x => x.replace(/台/g, '臺'), tt = x => x.replace(/臺/g, '台');
+  if (pa.road) {
+    const rd = pa.road + (pa.sec || ''), no = pa.no, d = pa.dist || '', c = pa.city || '';
+    if (no) { add(`${rd} ${no}號 ${d}`); add(`${rd} ${no} ${d}`); add(`${no} ${rd} ${d} ${c}`); add(`${rd} ${no}號`); add(`${rd} ${no}`); }
+    add(`${rd} ${d} ${c}`); add(`${rd} ${c}`); add(rd);
+  }
+  add(tw(v)); add(tt(v));
+  const noFloor = v.replace(/[\d一二三四五六七八九十]+\s*[樓Ff](之\d+)?.*$/, ''), noNo = noFloor.replace(/[\d-]+\s*(之[\d-]+)?\s*號.*$/, '').replace(/[\d-]+$/, '');
+  add(noFloor); add(noNo); add(tw(noNo));
+  const parts = v.split(/[\s,，、]+/).filter(Boolean);
+  if (parts.length > 1) { add(parts[0]); add(parts.slice(0, 2).join(' ')); }
+  if (v.length >= 5) add(v.slice(0, -1));
+  return out.slice(0, 11);
+}
+async function photonSearch(q, sc) {
+  const { cc, box } = scopeParams(sc), ref = App.me || map.getCenter();
+  const j = await Geo.json(`https://photon.komoot.io/api/?limit=8&q=${encodeURIComponent(q)}&lat=${ref.lat}&lon=${ref.lng}`);
+  const lo = box ? Math.min(box[0], box[2]) : -180, hi = box ? Math.max(box[0], box[2]) : 180, sa = box ? Math.min(box[1], box[3]) : -90, na = box ? Math.max(box[1], box[3]) : 90;
+  return ((j && j.features) || []).filter(f => (!cc || (f.properties.countrycode || '').toLowerCase() === cc.toLowerCase())
+      && f.geometry.coordinates[0] >= lo && f.geometry.coordinates[0] <= hi && f.geometry.coordinates[1] >= sa && f.geometry.coordinates[1] <= na)
+    .map(f => { const p = f.properties; return { name: p.name || [p.street, p.housenumber].filter(Boolean).join(' ') || q,
+      addr: [p.housenumber, p.street, p.district, p.city, p.state, p.country].filter(Boolean).join(', '), lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0] }; });
+}
+async function addrSearch(v, sc, progress) {
+  progress = progress || (() => {});
+  const { cc, box } = scopeParams(sc), ref = App.me || map.getCenter();
+  const nom = async text => {
+    const b = map.getBounds();
+    let url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=8&addressdetails=1&accept-language=zh-TW,zh,en&q=${encodeURIComponent(text)}`;
+    if (cc) url += '&countrycodes=' + cc;
+    if (box) url += `&viewbox=${box[0]},${box[1]},${box[2]},${box[3]}&bounded=1`; else url += `&viewbox=${b.getWest()},${b.getNorth()},${b.getEast()},${b.getSouth()}`;
+    const j = await Geo.json(url);
+    return j.map(r => ({ name: String(r.name || r.display_name.split(',')[0]).trim(), addr: r.display_name, lat: +r.lat, lng: +r.lon }));
+  };
+  const pa = parseTwAddr(v), wantNo = !!(pa.no && (pa.road || pa.dist));
+  const hit = r => wantNo && houseHit(r, pa.no);
+  let list = [], fuzzy = false;
+  const merge = more => { for (const r of more) if (!list.some(x => Math.abs(x.lat - r.lat) < 1e-4 && Math.abs(x.lng - r.lng) < 1e-4)) list.push(r); };
+  const done = () => list.length > 0 && (!wantNo || list.some(hit));
+  merge(await nom(v));
+  if (!done()) {
+    const vs = addrVariants(v, pa).slice(1);
+    for (let i = 0; i < vs.length && !done(); i++) {   // Nominatim 限制約每秒 1 次，故間隔 1.1 秒
+      progress(`🔍 ${list.length ? '門牌尚未確認' : '查無完全相符'}，模糊比對中…（${i + 1}/${vs.length}）`);
+      await sleep(1100);
+      const more = await nom(vs[i]); if (more.length) { merge(more); fuzzy = true; }
+      if (list.length && !wantNo) break;
+    }
+  }
+  if (!done()) {
+    progress('🌐 改用第二個資料來源（Photon）查詢…');
+    try {
+      const qs = [v]; if (pa.road) qs.push(`${pa.road}${pa.sec || ''} ${pa.no || ''}`.trim());
+      for (const q of qs) { merge(await photonSearch(q, sc)); if (done()) break; }
+      if (list.length) fuzzy = true;
+    } catch (e) {}
+  }
+  list = list.map(r => ({ ...r, hit: wantNo ? !!hit(r) : null, dist: hav(ref, r) }));
+  list.sort((a, b) => ((b.hit === true) - (a.hit === true)) || a.dist - b.dist);
+  return { list, fuzzy, pa };
+}
+
 /* --- 分頁：查詢（原「座標」）：輸入地址或名稱，找地點並新增標記；保留座標新增表單 --- */
 UI.addTab({
   id: 'coord', label: '🔍 查詢',
@@ -875,7 +978,7 @@ UI.addTab({
     const qIn = $('#qIn', el), st = $('#qSt', el), ul = $('#qList', el), qLayer = L.layerGroup().addTo(map);
     let results = [], refName = '';
     const draw = () => {
-      ul.innerHTML = results.map((r, i) => `<li class="wrap" data-i="${i}"><span class="ic">📍</span><div style="flex:1"><div class="t">${esc(r.name)}</div><div class="muted">${r.dist != null ? '📏 ' + fmtDist(r.dist) + '｜' : ''}${esc(r.addr)}</div></div>
+      ul.innerHTML = results.map((r, i) => `<li class="wrap" data-i="${i}"><span class="ic">📍</span><div style="flex:1"><div class="t">${esc(r.name)}</div><div class="muted">${r.hit === true ? '✅ 門牌相符｜' : r.hit === false ? '⚠️ 門牌未確認｜' : ''}${r.dist != null ? '📏 ' + fmtDist(r.dist) + '｜' : ''}${esc(r.addr)}</div></div>
         <div class="btns"><button type="button" data-a="go">前往</button><button type="button" data-a="nav">🧭 導航</button><button type="button" data-a="add">＋ 新增標記</button><button type="button" data-a="fav">⭐ 常用</button></div></li>`).join('');
     };
     const go = i => {
@@ -887,28 +990,6 @@ UI.addTab({
     const askBox = $('#qAsk', el), scopeEl = $('#qScope', el);
     const showScope = () => { scopeEl.textContent = `🌏 查詢範圍：${scopeLabel(Store.state.settings.scope)}（可在「設定」調整）`; };
     this.onShow = showScope; showScope();
-    const variants = v => {   // 模糊比對：台↔臺、去掉樓層／門牌號、取前段關鍵字、少一個字
-      const out = [v], add = s => { s = (s || '').trim(); if (s && !out.includes(s)) out.push(s); };
-      add(v.replace(/台/g, '臺')); add(v.replace(/臺/g, '台'));
-      const noFloor = v.replace(/[\d一二三四五六七八九十]+\s*[樓Ff](之\d+)?.*$/, '');
-      const noNo = noFloor.replace(/[\d-]+\s*(之[\d-]+)?\s*號.*$/, '').replace(/[\d-]+$/, '');
-      add(noFloor); add(noNo); add(noNo.replace(/台/g, '臺'));
-      const parts = v.split(/[\s,，、]+/).filter(Boolean);
-      if (parts.length > 1) { add(parts[0]); add(parts.slice(0, 2).join(' ')); }
-      if (v.length >= 5) add(v.slice(0, -1));
-      return out.slice(0, 7);
-    };
-    const nom = async (text, sc) => {
-      const { cc, box } = scopeParams(sc), b = map.getBounds();
-      let url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=8&addressdetails=1&accept-language=zh-TW,zh,en&q=${encodeURIComponent(text)}`;
-      if (cc) url += '&countrycodes=' + cc;
-      if (box) url += `&viewbox=${box[0]},${box[1]},${box[2]},${box[3]}&bounded=1`;
-      else url += `&viewbox=${b.getWest()},${b.getNorth()},${b.getEast()},${b.getSouth()}`;
-      const j = await Geo.json(url);
-      const ref = App.me || map.getCenter(); refName = App.me ? '目前位置' : '地圖中心';
-      return j.map(r => ({ name: String(r.name || r.display_name.split(',')[0]).trim(), addr: r.display_name, lat: +r.lat, lng: +r.lon }))
-        .map(r => ({ ...r, dist: hav(ref, r) })).sort((a, b) => a.dist - b.dist);   // 由近到遠
-    };
     const run = async over => {
       const v = qIn.value.trim(); if (!v) return;
       askBox.innerHTML = ''; showScope();
@@ -919,17 +1000,13 @@ UI.addTab({
       const sc = over || Store.state.settings.scope;
       st.textContent = '⏳ 查詢中…'; ul.innerHTML = '';
       try {
-        let found = await nom(v, sc), fuzzy = false;
-        if (!found.length) {   // 先模糊比對（Nominatim 限制約每秒 1 次，故間隔 1.1 秒）
-          const vs = variants(v).slice(1);
-          for (let i = 0; i < vs.length && !found.length; i++) {
-            st.textContent = `🔍 查無完全相符，模糊比對中…（${i + 1}/${vs.length}）`;
-            await new Promise(r => setTimeout(r, 1100));
-            found = await nom(vs[i], sc); fuzzy = found.length > 0;
-          }
+        const rs = await addrSearch(v, sc, t => { st.textContent = t; });
+        refName = App.me ? '目前位置' : '地圖中心'; results = rs.list; draw();
+        if (results.length) {
+          const hits = results.filter(r => r.hit).length;
+          st.textContent = `找到 ${results.length} 筆${rs.fuzzy ? '（含模糊比對結果，請確認是否正確）' : ''}${rs.pa.no ? (hits ? `｜✅ 門牌相符 ${hits} 筆（排在最前）` : '｜⚠️ 找不到相同門牌，已列出最接近的路段／地點，可前往後在地圖長按微調位置') : ''}｜範圍：${scopeLabel(sc)}｜依距離由近到遠（基準：${refName}）`;
+          go(0); return;
         }
-        results = found; draw();
-        if (results.length) { st.textContent = `找到 ${results.length} 筆${fuzzy ? '（模糊比對結果，請確認是否正確）' : ''}｜範圍：${scopeLabel(sc)}｜依距離由近到遠（基準：${refName}）`; go(0); return; }
         st.textContent = `在「${scopeLabel(sc)}」內查無資料（已做模糊比對）。`;
         const wider = widerScope(sc);
         if (wider) {
@@ -951,7 +1028,7 @@ UI.addTab({
       const li = e.target.closest('li[data-i]'); if (!li) return;
       const i = +li.dataset.i, r = results[i], a = e.target.dataset.a;
       if (a === 'add') Form.openNew({ lat: r.lat, lng: r.lng }, { name: r.raw ? '' : r.name, addr: r.raw ? '' : r.addr });
-      else if (a === 'nav') Hooks.navigateTo({ lat: r.lat, lng: r.lng, name: r.raw ? r.addr : r.name });
+      else if (a === 'nav') Hooks.navigateTo({ lat: r.lat, lng: r.lng, name: r.raw ? r.addr : r.name, addr: r.raw ? '' : r.addr, named: !r.raw });
       else if (a === 'fav') Places.add({ name: r.raw ? r.addr : r.name, lat: r.lat, lng: r.lng });
       else go(i);
     };
@@ -1151,7 +1228,7 @@ UI.addTab({
     $('#rAdd', el).onclick = () => { if (R.pts.length >= 8) return; R.pts.splice(R.pts.length - 1, 0, null); drawPts(); openCh(R.pts.length - 2); };
 
     const setPoint = (i, p) => {
-      R.pts[i] = { lat: +p.lat, lng: +p.lng, name: p.name || `${(+p.lat).toFixed(5)}, ${(+p.lng).toFixed(5)}`, ref: p.ref || '' };
+      R.pts[i] = { lat: +p.lat, lng: +p.lng, name: p.name || `${(+p.lat).toFixed(5)}, ${(+p.lng).toFixed(5)}`, ref: p.ref || '', addr: p.addr || '', named: !!p.named };
       chI = -1; renderCh(); drawPts(); plan();
     };
 
@@ -1173,8 +1250,8 @@ UI.addTab({
       const mks = q ? Store.state.markers.filter(m => norm(m.name + ' ' + m.addr).includes(q)).slice(0, 8) : [];
       items = [
         ...favs.map(p => ({ ic: '⭐', name: p.name, sub: '常用地點', lat: p.lat, lng: p.lng })),
-        ...mks.map(m => ({ ic: Cats.get(m.catId).emoji, name: m.name, sub: m.addr || '已存標記', lat: m.lat, lng: m.lng, ref: m.id })),
-        ...nomRes.map(r => ({ ic: '🔎', name: r.name, sub: r.addr, lat: r.lat, lng: r.lng }))
+        ...mks.map(m => ({ ic: Cats.get(m.catId).emoji, name: m.name, sub: m.addr || '已存標記', addr: m.addr || '', named: true, lat: m.lat, lng: m.lng, ref: m.id })),
+        ...nomRes.map(r => ({ ic: '🔎', name: r.name, sub: (r.hit === true ? '✅ 門牌相符｜' : r.hit === false ? '⚠️ 門牌未確認｜' : '') + r.addr, addr: r.addr, named: true, lat: r.lat, lng: r.lng }))
       ];
       ul.innerHTML = items.map((x, k) => `<li data-k="${k}"><span class="ic">${esc(x.ic)}</span><div style="min-width:0"><div class="t">${esc(x.name)}</div><div class="muted">${esc(x.sub)}</div></div></li>`).join('')
         || '<li class="muted" style="cursor:default">沒有符合的項目，可按「搜尋」查地址或名稱</li>';
@@ -1186,14 +1263,10 @@ UI.addTab({
       if (cp && /^[-+\d.\s,，]+$/.test(v) && Math.abs(cp[0]) <= 90 && Math.abs(cp[1]) <= 180) return setPoint(chI, { lat: cp[0], lng: cp[1], name: `${cp[0]}, ${cp[1]}` });
       qs.textContent = '⏳ 查詢中…';
       try {
-        const { cc, box } = scopeParams(Store.state.settings.scope);
-        let url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=8&accept-language=zh-TW,zh,en&q=${encodeURIComponent(v)}`;
-        if (cc) url += '&countrycodes=' + cc;
-        if (box) url += `&viewbox=${box[0]},${box[1]},${box[2]},${box[3]}&bounded=1`;
-        const j = await Geo.json(url), ref = App.me || map.getCenter();
-        nomRes = j.map(r => ({ name: String(r.name || r.display_name.split(',')[0]).trim(), addr: r.display_name, lat: +r.lat, lng: +r.lon }))
-          .map(r => ({ ...r, d: hav(ref, r) })).sort((a, b) => a.d - b.d);
-        qs.textContent = nomRes.length ? `找到 ${nomRes.length} 筆（由近到遠，範圍：${scopeLabel(Store.state.settings.scope)}）` : `在「${scopeLabel(Store.state.settings.scope)}」內查無資料，可到「設定」放寬查詢範圍`;
+        const sc = Store.state.settings.scope, rs = await addrSearch(v, sc, t => { qs.textContent = t; });
+        nomRes = rs.list;
+        const hits = nomRes.filter(r => r.hit).length;
+        qs.textContent = nomRes.length ? `找到 ${nomRes.length} 筆${rs.pa.no ? (hits ? `｜✅ 門牌相符 ${hits} 筆` : '｜⚠️ 找不到相同門牌，列出最接近的結果') : ''}（範圍：${scopeLabel(sc)}）` : `在「${scopeLabel(sc)}」內查無資料，可到「設定」放寬查詢範圍，或改用「地圖點選」`;
         fillList();
       } catch (e) { qs.textContent = '❌ 查詢失敗或逾時，請稍後再試'; }
     };
@@ -1231,6 +1304,7 @@ UI.addTab({
         <div class="muted">⚠️ 係數是依經驗推估的時段加權，不是即時或歷史路況；連假、事故、天氣可能與實際有落差。</div>` : '<div class="muted">步行／自行車依一般速度估算，不受平假日影響。</div>'}
         <div class="row" style="margin-top:8px"><button type="button" class="primary" data-a="save">💾 儲存路線</button><button type="button" data-a="redo">🔄 重新規劃</button></div>
         <div class="muted" style="margin-top:8px">📤 開啟或分享給其他地圖 App（Google／Apple 會用自己的演算法重算路線，起終點與中途點會帶過去）</div>
+        <label style="margin:6px 0 0">地點傳給地圖 App 的方式<select id="rShareMode"><option value="text" ${Store.state.settings.shareMode !== 'coord' ? 'selected' : ''}>店名／地址（有的話；讓 Google 自己找到那間店）</option><option value="coord" ${Store.state.settings.shareMode === 'coord' ? 'selected' : ''}>座標（精確位置，但 Google 可能標成附近的別間店）</option></select></label>
         <div class="row" style="margin-top:4px"><button type="button" data-a="gmap">🗺️ Google 地圖</button><button type="button" data-a="amap">🍎 Apple 地圖</button><button type="button" data-a="share">📤 分享</button><button type="button" data-a="copy">📋 複製連結</button></div></div>`;
       if (R.lastShown !== r) { R.lastShown = r; R.said = new Set(); R.metric = routeMetric(r.geometry); }
       drawCams(r); drawSteps(r); renderRem();
@@ -1238,7 +1312,6 @@ UI.addTab({
     };
     const drawCams = r => {
       R.camList = [];
-      if (R.profile !== 'driving') { camBox.innerHTML = ''; return; }
       const list = camsAlong(r.geometry, 50); R.camList = list;
       const total = Store.state.markers.filter(m => m.speedLimit > 0 || m.catId === 'speedcam').length;
       if (!list.length) {
@@ -1280,16 +1353,22 @@ UI.addTab({
     /* 分享／開啟其他地圖 App */
     const mapLinks = explicit => {
       const pt = R.pts, ll = x => `${(+x.lat).toFixed(6)},${(+x.lng).toFixed(6)}`, last = pt[pt.length - 1], mid = pt.slice(1, -1);
+      const byText = Store.state.settings.shareMode !== 'coord';   // 預設：有店名／地址的點，用文字讓 Google 自己找到那間店；否則用座標
+      const place = x => {
+        if (byText && x.named && (x.addr || x.name)) return encodeURIComponent(x.addr && x.name && x.addr.includes(x.name) ? x.addr : [x.name, x.addr].filter(Boolean).join(' '));
+        return ll(x);
+      };
       const live = !explicit && pt[0].name === '目前位置';   // 自己開啟時，起點省略＝由地圖 App 使用即時位置；傳給別人時一定帶座標
-      let g = 'https://www.google.com/maps/dir/?api=1' + (live ? '' : '&origin=' + ll(pt[0])) + '&destination=' + ll(last) + '&travelmode=' + { driving: 'driving', cycling: 'bicycling', walking: 'walking' }[R.profile];
-      if (mid.length) g += '&waypoints=' + mid.map(ll).join('%7C');
-      const a = 'https://maps.apple.com/?' + (live ? '' : 'saddr=' + ll(pt[0]) + '&') + 'daddr=' + [...mid, last].map(ll).join('+to:') + '&dirflg=' + { driving: 'd', cycling: 'b', walking: 'w' }[R.profile];
+      let g = 'https://www.google.com/maps/dir/?api=1' + (live ? '' : '&origin=' + place(pt[0])) + '&destination=' + place(last) + '&travelmode=' + { driving: 'driving', cycling: 'bicycling', walking: 'walking' }[R.profile];
+      if (mid.length) g += '&waypoints=' + mid.map(place).join('%7C');
+      const a = 'https://maps.apple.com/?' + (live ? '' : 'saddr=' + place(pt[0]) + '&') + 'daddr=' + [...mid, last].map(place).join('+to:') + '&dirflg=' + { driving: 'd', cycling: 'b', walking: 'w' }[R.profile];
       return { g, a };
     };
     const shareBlock = () => {
       const pt = R.pts, L2 = mapLinks(true), r = R.route, dep = departDate(), sec = R.profile === 'driving' ? adjustDuration(r, dep, R.holiday).sec : r.duration;
-      return { title: `路線：${pt[0].name} → ${pt[pt.length - 1].name}`, text: `🧭 ${pt[0].name} → ${pt[pt.length - 1].name}\n${Router.PROFILES[R.profile].label}｜${fmtDist(r.distance)}｜約 ${fmtDur(sec)}\nGoogle 地圖：${L2.g}\nApple 地圖：${L2.a}` };
+      return { title: `路線：${pt[0].name} → ${pt[pt.length - 1].name}`, text: `🧭 ${pt[0].name} → ${pt[pt.length - 1].name}\n${Router.PROFILES[R.profile].label}｜${fmtDist(r.distance)}｜約 ${fmtDur(sec)}\nGoogle 地圖：${L2.g}\nApple 地圖：${L2.a}\n📍 終點精確位置（釘選點）：${gLink(pt[pt.length - 1].lat, pt[pt.length - 1].lng)}` };
     };
+    sum.onchange = e => { if (e.target.id === 'rShareMode') { Store.state.settings.shareMode = e.target.value; Store.save(); toast('✓ 已自動儲存', 1200); } };
     sum.onclick = e => {
       const a = e.target.dataset.a; if (!a) return;
       if (a === 'redo') plan();
@@ -1347,10 +1426,10 @@ UI.addTab({
       renderRem();
     };
     function renderRem() {
-      if (R.profile !== 'driving' || !R.camList.length) { remBox.innerHTML = ''; if (Rem.id != null) stopRem(); return; }
-      const on = Rem.id != null;
-      remBox.innerHTML = `<div class="hrsbox"><b>⚠️ 此路線經過 ${R.camList.length} 處測速照相</b>
-        <div class="row" style="margin:6px 0"><button type="button" class="${on ? 'danger' : 'primary'}" data-a="rem">${on ? '⏹ 停止測速提醒' : '🔔 開始測速提醒（行駛中使用）'}</button></div>
+      if (!R.camList.length) { remBox.innerHTML = ''; if (Rem.id != null) stopRem(); return; }
+      const on = Rem.id != null, lims = [...new Set(R.camList.map(x => x.m.speedLimit).filter(Boolean))].sort((a, b) => a - b);
+      remBox.innerHTML = `<div class="hrsbox"><b>⚠️ 此路線經過 ${R.camList.length} 處測速照相</b>${lims.length ? `<span class="muted">（速限 ${lims.join('、')} km/h）</span>` : ''}
+        <div class="row" style="margin:6px 0"><button type="button" class="${on ? 'danger' : 'primary'}" data-a="rem">${on ? '⏹ 停止測速提醒' : '🔔 開始測速提醒（行進中使用）'}</button></div>
         <div class="muted" id="rRemSt">${esc(R.remText)}</div>
         <div class="muted">靠近前方測速照相時會跳出警示、震動、語音與提示音。需保持此網頁在前景、螢幕不鎖定；手機切到別的 App 或鎖屏後，瀏覽器通常會停止定位。提醒僅供參考，請依現場標誌與速限行駛，行車中請勿操作手機。</div></div>`;
     }
@@ -1414,7 +1493,7 @@ UI.addTab({
       if (document.body.classList.contains('side-closed')) { document.body.classList.remove('side-closed'); setTimeout(() => map.invalidateSize(), 50); }
       UI.show('route');
       stopRem(); R.tok++; R.route = null; clearDraw(); chI = -1; renderCh();
-      R.pts = [null, { lat: m.lat, lng: m.lng, name: m.name || `${(+m.lat).toFixed(5)}, ${(+m.lng).toFixed(5)}`, ref: m.id || '' }];
+      R.pts = [null, { lat: m.lat, lng: m.lng, name: m.name || `${(+m.lat).toFixed(5)}, ${(+m.lng).toFixed(5)}`, ref: m.id || '', addr: m.addr || '', named: m.named !== undefined ? !!m.named : !!m.id }];
       drawPts(); st.textContent = '📡 取得目前位置…';
       try {
         const p = await App.getLocation();
@@ -1872,7 +1951,7 @@ UI.addTab({
         <div class="muted" style="margin:4px 0 8px">先限制國家，再限制區域，避免搜尋結果跑到別的國家。查無資料時會先模糊比對，再詢問是否擴大範圍。區域邊界為粗略範圍。</div>
         <label>國家<select id="sCtry"></select></label>
         <label>區域<select id="sReg"></select></label></div>
-      <label>長按地圖新增標記的時間（秒，0.4～2）<input type="number" id="sLp" min="0.4" max="2" step="0.1"></label>
+      <label>長按地圖的時間（秒，0.4～2）<input type="number" id="sLp" min="0.4" max="2" step="0.1"></label>
       <label style="display:flex;gap:6px;align-items:center;color:var(--fg)"><input type="checkbox" id="sGeo" style="width:auto;margin:0"> 點擊地圖新增標記時，自動查詢地名（Nominatim）</label>
       <p class="muted">地圖右下角的＋－與滑桿可隨時手動調整縮放。GPS 定位需要 https 或 localhost。</p>`;
     const q = s => $(s, el), S = () => Store.state.settings, save = () => { Store.save(); toast('✓ 已自動儲存', 1200); };
