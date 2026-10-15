@@ -1049,6 +1049,7 @@ UI.addTab({
  * 路線資料以 [[lat,lng],…] 折線儲存，階段四的控制點拖曳與軌跡回放直接沿用。 */
 const Router = {
   PROFILES: {
+    moto: { label: '🛵 機車', path: 'routed-car', moto: true },   // 以汽車路網為基礎，另行估算機車時間
     driving: { label: '🚗 開車', path: 'routed-car' },
     cycling: { label: '🚲 自行車', path: 'routed-bike' },
     walking: { label: '🚶 步行', path: 'routed-foot' }
@@ -1056,15 +1057,25 @@ const Router = {
   DEFAULT_BASE: 'https://routing.openstreetmap.de/{p}/route/v1/driving/',
   base(profile) { return (Store.state.settings.routeBase || this.DEFAULT_BASE).replace('{p}', this.PROFILES[profile].path); },
   async route(profile, pts) {
-    const coords = pts.map(p => (+p.lng).toFixed(6) + ',' + (+p.lat).toFixed(6)).join(';');
-    const url = this.base(profile) + coords + '?overview=full&geometries=geojson&steps=true&alternatives=false';
-    const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 20000);
-    let r;
-    try { r = await fetch(url, { signal: ac.signal }); }
-    catch (e) { throw new Error(ac.signal.aborted ? '路線伺服器回應逾時，請稍後再試' : '無法連線到路線伺服器（請確認網路；若持續失敗，可能是伺服器不允許網頁直接連線）'); }
-    finally { clearTimeout(timer); }
-    let j = null; try { j = await r.json(); } catch (e) {}
-    if (!r.ok || !j || j.code !== 'Ok' || !j.routes || !j.routes[0]) {
+    const P = this.PROFILES[profile], coords = pts.map(p => (+p.lng).toFixed(6) + ',' + (+p.lat).toFixed(6)).join(';');
+    const call = async extra => {
+      const url = this.base(profile) + coords + '?overview=full&geometries=geojson&steps=true&alternatives=false' + extra;
+      const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 20000);
+      let r;
+      try { r = await fetch(url, { signal: ac.signal }); }
+      catch (e) { throw new Error(ac.signal.aborted ? '路線伺服器回應逾時，請稍後再試' : '無法連線到路線伺服器（請確認網路；若持續失敗，可能是伺服器不允許網頁直接連線）'); }
+      finally { clearTimeout(timer); }
+      let j = null; try { j = await r.json(); } catch (e) {}
+      return { r, j };
+    };
+    const okRes = o => o.r.ok && o.j && o.j.code === 'Ok' && o.j.routes && o.j.routes[0];
+    let avoided = !!(P.moto && !this.noExclude), res = await call(avoided ? '&exclude=motorway' : '');   // 機車不能上國道：先要求避開高速公路
+    if (avoided && !okRes(res)) {   // 伺服器不支援避開（或避開後無路可走）→ 改用一般查詢，並在畫面提醒
+      const c = res.j && res.j.code; if (!c || /^Invalid/.test(c)) this.noExclude = true;
+      avoided = false; res = await call('');
+    }
+    const { r, j } = res;
+    if (!okRes(res)) {
       const c = j && j.code;
       if (c === 'NoRoute') throw new Error('找不到可行路線（起終點之間可能沒有道路相連，例如隔海；或所選交通方式不能通行）');
       if (c === 'NoSegment') throw new Error('起點或終點附近找不到道路，請把點移到道路附近');
@@ -1077,7 +1088,19 @@ const Router = {
       leg: li, type: s.maneuver.type, mod: s.maneuver.modifier || '', name: s.name || '', ref: s.ref || '',
       dist: s.distance, dur: s.duration, loc: [s.maneuver.location[1], s.maneuver.location[0]], exit: s.maneuver.exit || 0
     })));
-    return { geometry: rt.geometry.coordinates.map(c => [c[1], c[0]]), distance: rt.distance, duration: rt.duration, steps };
+    const out = { geometry: rt.geometry.coordinates.map(c => [c[1], c[0]]), distance: rt.distance, duration: rt.duration, steps };
+    if (P.moto) {   // 機車時間：每一步以「汽車速度」為基礎，套用速度上限與停等折減，再加轉彎延遲
+      const S = Store.state.settings, cap = (S.motoCapKmh || 50) / 3.6, eff = S.motoEff || 0.8; let tot = 0;
+      steps.forEach(st => {
+        if (st.dist > 0) st.dur = st.dist / ((st.dur > 0 ? Math.min(st.dist / st.dur, cap) : cap) * eff);
+        if (st.type !== 'depart' && st.type !== 'arrive') st.dur += 3;
+        tot += st.dur;
+      });
+      out.duration = steps.length ? tot : rt.distance / (cap * eff);
+      out.moto = true; out.avoidMotorway = avoided;
+      out.hwy = steps.some(st => /國道|高速公路|快速公路|快速道路|^國\d|^N\d/i.test((st.name || '') + ' ' + (st.ref || '')));
+    }
+    return out;
   }
 };
 const fmtDur = s => {
@@ -1124,8 +1147,8 @@ function trafficFactor(d, holiday) {
   if ((h >= 6 && h < 7) || (h >= 19.5 && h < 21)) return [1.15, '尖峰前後'];
   return [1.0, '夜間／清晨較順暢'];
 }
-function adjustDuration(r, depart, holiday) {   // 逐步依「行進到的時刻」套用係數；遠程（>30 km）影響遞減，因高速路段較不受市區尖峰影響
-  const eff = f => 1 + (f - 1) * Math.min(1, 30000 / Math.max(r.distance, 1));
+function adjustDuration(r, depart, holiday, scale = 1) {   // 逐步依「行進到的時刻」套用係數；遠程（>30 km）影響遞減，因高速路段較不受市區尖峰影響
+  const eff = f => 1 + (f - 1) * scale * Math.min(1, 30000 / Math.max(r.distance, 1));
   const steps = r.steps && r.steps.length ? r.steps : [{ dur: r.duration }];
   let t = depart.getTime(), tot = 0, label = '';
   for (const s of steps) { const [f, lab] = trafficFactor(new Date(t), holiday); if (!label) label = lab; const d = s.dur * eff(f); tot += d; t += d * 1000; }
@@ -1183,13 +1206,13 @@ UI.addTab({
       <div id="rPts"></div>
       <div class="row" style="margin:6px 0 8px"><button type="button" id="rAdd">＋ 加中途點</button><button type="button" id="rSwap">⇅ 起終點互換</button><button type="button" id="rClear" class="danger">🗑️ 清除路線</button></div>
       <div id="rCh" class="hrsbox" style="display:none"></div>
-      <div class="hrsbox" id="rTimeBox"><b>🕒 出發時間</b><span class="muted">（開車的時間推估會依平日／假日與時段調整）</span>
+      <div class="hrsbox" id="rTimeBox"><b>🕒 出發時間</b><span class="muted">（開車／機車的時間推估會依平日／假日與時段調整）</span>
         <div class="row" style="flex-wrap:nowrap;margin:6px 0"><select id="rWhen" style="width:auto;flex:none"><option value="now">現在出發</option><option value="set">指定時間</option></select><input type="datetime-local" id="rDt" style="flex:1;min-width:0;display:none"></div>
         <label style="display:flex;gap:6px;align-items:center;color:var(--fg);margin:0"><input type="checkbox" id="rHol" style="width:auto;margin:0"> 當天是國定假日／連假（週六日會自動判斷）</label></div>
       <div class="muted" id="rSt"></div>
       <div id="rSum"></div><div id="rRem"></div><div id="rCams"></div><div id="rSteps"></div>
       <h4>已儲存路線</h4><ul class="items" id="rSaved"></ul>`;
-    const R = { profile: 'driving', pts: [null, null], route: null, tok: 0, when: 'now', dt: '', holiday: false, camList: [], metric: null, said: new Set(), remText: '', lastShown: null };
+    const R = { profile: Router.PROFILES[Store.state.settings.routeProfile] ? Store.state.settings.routeProfile : 'moto', pts: [null, null], route: null, tok: 0, when: 'now', dt: '', holiday: false, camList: [], metric: null, said: new Set(), remText: '', lastShown: null };
     const lineLayer = L.layerGroup().addTo(map), ptLayer = L.layerGroup().addTo(map), camLayer = L.layerGroup().addTo(map);
     const stepsBox = $('#rSteps', el), stepLayer = L.layerGroup().addTo(map), st = $('#rSt', el), sum = $('#rSum', el), camBox = $('#rCams', el), ptsBox = $('#rPts', el), chBox = $('#rCh', el);
     const letter = i => String.fromCharCode(65 + i);
@@ -1296,11 +1319,13 @@ UI.addTab({
       const r = R.route; if (!r) return;
       L.polyline(r.geometry, { color: '#fff', weight: 9, opacity: .9, interactive: false }).addTo(lineLayer);
       L.polyline(r.geometry, { color: '#2563eb', weight: 5, opacity: .95, interactive: false }).addTo(lineLayer);
-      const dep = departDate(), drv = R.profile === 'driving', adj = adjustDuration(r, dep, R.holiday), sec = drv ? adj.sec : r.duration;
+      const dep = departDate(), mo = R.profile === 'moto', drv = R.profile === 'driving' || mo, adj = adjustDuration(r, dep, R.holiday, mo ? 0.5 : 1), sec = drv ? adj.sec : r.duration;
       const eta = new Date(dep.getTime() + sec * 1000);
       sum.innerHTML = `<div class="hrsbox"><div style="font-size:17px"><b>${fmtDist(r.distance)}</b>　約 <b>${fmtDur(sec)}</b></div>
         <div class="muted">${esc(Router.PROFILES[R.profile].label)}｜${fmtHM(dep)} 出發 → 預計 ${fmtHM(eta)} 到達${eta.toDateString() !== dep.toDateString() ? '（隔天）' : ''}</div>
-        ${drv ? `<div class="muted">時段：${esc(adj.label)}（係數 ×${adj.factor.toFixed(2)}）｜路網基礎時間 ${fmtDur(r.duration)}</div>
+        ${drv ? `<div class="muted">時段：${esc(adj.label)}（係數 ×${adj.factor.toFixed(2)}${mo ? '，機車約為汽車的一半影響' : ''}）｜${mo ? '機車基礎時間' : '路網基礎時間'} ${fmtDur(r.duration)}</div>
+        ${mo ? `<div class="muted">🛵 機車估算：以汽車路網車速為基礎，速度上限 ${Store.state.settings.motoCapKmh || 50} km/h、停等折減 ×${Store.state.settings.motoEff || 0.8}、每個轉彎 +3 秒（可在「設定」依你的實際騎乘調整）。</div>
+        ${r.hwy ? '<div style="color:var(--danger);font-size:12px">⚠️ 路線可能經過國道／快速道路，機車通常不能通行；請在地圖加中途點繞開，或改走平面道路。</div>' : (r.avoidMotorway ? '<div class="muted">已要求路線避開高速公路。</div>' : '<div class="muted">此路線服務無法保證避開國道／快速道路，請留意轉彎指引。</div>')}` : ''}
         <div class="muted">⚠️ 係數是依經驗推估的時段加權，不是即時或歷史路況；連假、事故、天氣可能與實際有落差。</div>` : '<div class="muted">步行／自行車依一般速度估算，不受平假日影響。</div>'}
         <div class="row" style="margin-top:8px"><button type="button" class="primary" data-a="save">💾 儲存路線</button><button type="button" data-a="redo">🔄 重新規劃</button></div>
         <div class="muted" style="margin-top:8px">📤 開啟或分享給其他地圖 App（Google／Apple 會用自己的演算法重算路線，起終點與中途點會帶過去）</div>
@@ -1359,13 +1384,13 @@ UI.addTab({
         return ll(x);
       };
       const live = !explicit && pt[0].name === '目前位置';   // 自己開啟時，起點省略＝由地圖 App 使用即時位置；傳給別人時一定帶座標
-      let g = 'https://www.google.com/maps/dir/?api=1' + (live ? '' : '&origin=' + place(pt[0])) + '&destination=' + place(last) + '&travelmode=' + { driving: 'driving', cycling: 'bicycling', walking: 'walking' }[R.profile];
+      let g = 'https://www.google.com/maps/dir/?api=1' + (live ? '' : '&origin=' + place(pt[0])) + '&destination=' + place(last) + '&travelmode=' + { moto: 'two-wheeler', driving: 'driving', cycling: 'bicycling', walking: 'walking' }[R.profile];
       if (mid.length) g += '&waypoints=' + mid.map(place).join('%7C');
-      const a = 'https://maps.apple.com/?' + (live ? '' : 'saddr=' + place(pt[0]) + '&') + 'daddr=' + [...mid, last].map(place).join('+to:') + '&dirflg=' + { driving: 'd', cycling: 'b', walking: 'w' }[R.profile];
+      const a = 'https://maps.apple.com/?' + (live ? '' : 'saddr=' + place(pt[0]) + '&') + 'daddr=' + [...mid, last].map(place).join('+to:') + '&dirflg=' + { moto: 'd', driving: 'd', cycling: 'b', walking: 'w' }[R.profile];
       return { g, a };
     };
     const shareBlock = () => {
-      const pt = R.pts, L2 = mapLinks(true), r = R.route, dep = departDate(), sec = R.profile === 'driving' ? adjustDuration(r, dep, R.holiday).sec : r.duration;
+      const pt = R.pts, L2 = mapLinks(true), r = R.route, dep = departDate(), sec = (R.profile === 'driving' || R.profile === 'moto') ? adjustDuration(r, dep, R.holiday, R.profile === 'moto' ? 0.5 : 1).sec : r.duration;
       return { title: `路線：${pt[0].name} → ${pt[pt.length - 1].name}`, text: `🧭 ${pt[0].name} → ${pt[pt.length - 1].name}\n${Router.PROFILES[R.profile].label}｜${fmtDist(r.distance)}｜約 ${fmtDur(sec)}\nGoogle 地圖：${L2.g}\nApple 地圖：${L2.a}\n📍 終點精確位置（釘選點）：${gLink(pt[pt.length - 1].lat, pt[pt.length - 1].lng)}` };
     };
     sum.onchange = e => { if (e.target.id === 'rShareMode') { Store.state.settings.shareMode = e.target.value; Store.save(); toast('✓ 已自動儲存', 1200); } };
@@ -1922,6 +1947,8 @@ UI.addTab({
       const p = Store.state.places.find(x => x.id === li.dataset.id); if (!p) return;
       const a = e.target.dataset.a;
       if (a === 'def') { const s = Store.state.settings; s.defaultPlaceId = p.id; s.startMode = 'place'; Store.save(); UI.refresh(); toast(`已設為預設位置：${p.name}`); }
+      else if (a === 'ren') { const n = prompt('常用地點名稱', p.name); if (n !== null && n.trim()) { p.name = n.trim(); Store.save(); UI.refresh(); toast('已改名'); } }
+      else if (a === 'nav') Hooks.navigateTo({ lat: p.lat, lng: p.lng, name: p.name });
       else if (a === 'del') { if (confirm(`刪除常用地點「${p.name}」？`)) Places.remove(p.id); }
       else map.flyTo([p.lat, p.lng], defZoom());
     };
@@ -1929,7 +1956,7 @@ UI.addTab({
       const def = Store.state.settings.defaultPlaceId;
       ul.innerHTML = Store.state.places.map(p => `<li class="wrap" data-id="${esc(p.id)}"><span class="ic">${p.id === def ? '🏠' : '⭐'}</span>
         <div style="flex:1"><div class="t">${esc(p.name)}${p.id === def ? '（預設）' : ''}</div><div class="muted">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</div></div>
-        <div class="btns"><button data-a="go">前往</button><button data-a="def">設為預設位置</button><button class="danger" data-a="del">刪除</button></div></li>`).join('')
+        <div class="btns"><button data-a="go">前往</button><button data-a="nav">🧭 導航</button><button data-a="ren">✏️ 改名</button><button data-a="def">設為預設位置</button><button class="danger" data-a="del">刪除</button></div></li>`).join('')
         || '<li class="muted" style="cursor:default">還沒有常用地點。</li>';
     };
     this.refresh();
@@ -1947,6 +1974,11 @@ UI.addTab({
       <label>預設縮放級別：<b id="sZv"></b><input type="range" id="sZ" min="3" max="19"></label>
       <div class="row" style="margin-bottom:12px"><button id="sZcur">使用目前地圖縮放</button><button id="sGo">套用並前往預設位置</button></div>
       <label>附近搜尋預設半徑（公里，0.1～5）<input type="number" id="sR" min="0.1" max="5" step="0.1"></label>
+      <div class="hrsbox"><b>🧭 路線</b>
+        <label>預設交通方式（開啟路線分頁時使用）<select id="sRp"></select></label>
+        <div class="two"><label>機車速度上限（km/h）<input type="number" id="sMc" min="25" max="90" step="5"></label>
+        <label>機車停等折減（0.5～1）<input type="number" id="sMe" min="0.5" max="1" step="0.05"></label></div>
+        <div class="muted">機車時間 = 以汽車路網的車速為基礎，取「速度上限」並乘上「停等折減」（紅綠燈、車流），再每個轉彎加 3 秒。實際騎完後覺得估得太快就把折減調小（例如 0.7），太慢就調大。</div></div>
       <div class="hrsbox"><b>🌏 查詢範圍限制（用於「查詢」）</b>
         <div class="muted" style="margin:4px 0 8px">先限制國家，再限制區域，避免搜尋結果跑到別的國家。查無資料時會先模糊比對，再詢問是否擴大範圍。區域邊界為粗略範圍。</div>
         <label>國家<select id="sCtry"></select></label>
@@ -1955,10 +1987,12 @@ UI.addTab({
       <label style="display:flex;gap:6px;align-items:center;color:var(--fg)"><input type="checkbox" id="sGeo" style="width:auto;margin:0"> 點擊地圖新增標記時，自動查詢地名（Nominatim）</label>
       <p class="muted">地圖右下角的＋－與滑桿可隨時手動調整縮放。GPS 定位需要 https 或 localhost。</p>`;
     const q = s => $(s, el), S = () => Store.state.settings, save = () => { Store.save(); toast('✓ 已自動儲存', 1200); };
-    const mode = q('#sMode'), pl = q('#sPlace'), z = q('#sZ'), zv = q('#sZv'), rr = q('#sR'), geo = q('#sGeo'), lp = q('#sLp');
+    const rp = q('#sRp'), mc = q('#sMc'), me = q('#sMe'), mode = q('#sMode'), pl = q('#sPlace'), z = q('#sZ'), zv = q('#sZv'), rr = q('#sR'), geo = q('#sGeo'), lp = q('#sLp');
     const fill = () => {
       pl.innerHTML = '<option value="">— 尚無／未選擇 —</option>' + Store.state.places.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
       pl.value = S().defaultPlaceId || ''; mode.value = S().startMode; z.value = S().defaultZoom; zv.textContent = z.value;
+      rp.innerHTML = Object.entries(Router.PROFILES).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join(''); rp.value = Router.PROFILES[S().routeProfile] ? S().routeProfile : 'moto';
+      mc.value = S().motoCapKmh || 50; me.value = S().motoEff || 0.8;
       rr.value = S().searchRadiusKm; geo.checked = S().autoGeocode !== false; lp.value = (S().longPressMs || 700) / 1000;
     };
     mode.onchange = () => { S().startMode = mode.value; save(); };
@@ -1969,6 +2003,9 @@ UI.addTab({
     q('#sGo').onclick = () => { if (!goDefault(false)) toast('目前設定為「上次位置」，沒有預設位置可前往'); };
     rr.onchange = () => { S().searchRadiusKm = Math.min(5, Math.max(0.1, +rr.value || 2)); save(); fill(); };
     geo.onchange = () => { S().autoGeocode = geo.checked; save(); };
+    rp.onchange = () => { S().routeProfile = rp.value; save(); };
+    mc.onchange = () => { S().motoCapKmh = Math.min(90, Math.max(25, +mc.value || 50)); save(); fill(); };
+    me.onchange = () => { S().motoEff = Math.min(1, Math.max(0.5, +me.value || 0.8)); save(); fill(); };
     const cSel = q('#sCtry'), rSel = q('#sReg');
     const fillScope = () => {
       const sc = S().scope || (S().scope = { country: 'tw', region: '' });
