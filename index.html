@@ -56,7 +56,7 @@ dialog{max-height:92vh;overflow:auto}
 table.pv{width:100%;border-collapse:collapse;font-size:12px}
 table.pv td,table.pv th{border-bottom:1px solid var(--line);padding:3px 4px;text-align:left}
 .items li.wrap{flex-wrap:wrap}
-.items .btns{display:flex;gap:6px;width:100%}
+.items .btns{display:flex;gap:6px;width:100%;flex-wrap:wrap}
 .items .btns button{padding:3px 8px;font-size:12px}
 h4{margin:14px 0 6px}
 .hrsbox{margin-bottom:8px;padding:8px;border:1px solid var(--line);border-radius:10px}
@@ -399,7 +399,7 @@ const Markers = {
       ${m.addr ? `<div class="muted">📮 ${esc(m.addr)}</div>` : ''}
       ${m.speedLimit ? `<div>🚦 速限 <b>${m.speedLimit}</b> km/h${m.dir ? `<span class="muted">｜拍攝方向：${esc(m.dir)}</span>` : ''}</div>` : ''}
       ${m.hours ? `<div>🕒 ${esc(m.hours)} <span class="muted">（營業時間更新於 ${fmtDate(m.hoursUpdatedAt || m.updatedAt)}）</span></div>` : ''}
-      ${m.note ? `<p>${esc(m.note)}</p>` : ''}
+      ${m.note ? `<p>${linkify(esc(m.note))}</p>` : ''}
       <div class="muted">${m.lat.toFixed(5)}, ${m.lng.toFixed(5)}｜最後編輯：${fmtDate(m.updatedAt)}</div>
       <div class="row"><button class="primary" data-a="nav">🧭 規劃從目前位置到這裡</button>
       <button data-a="fav">⭐ 設為常用地點</button><button data-a="share">📤 分享／複製</button><button data-a="edit">編輯</button><button data-a="del" class="danger">刪除</button></div>`;
@@ -889,6 +889,88 @@ UI.addTab({
   }
 });
 
+/* ---------------- 共用：座標解析、完整地址、連結化、TDX 監視器 ---------------- */
+function extractLatLng(text) {   // 純座標、度分秒、Google／Apple 地圖網址 → {lat,lng}
+  const t = String(text || '').trim(); if (!t) return null;
+  const ok = (a, b) => (Math.abs(a) <= 90 && Math.abs(b) <= 180) ? { lat: a, lng: b } : (Math.abs(b) <= 90 && Math.abs(a) <= 180 ? { lat: b, lng: a } : null);
+  let m;
+  if (/^https?:\/\//i.test(t) || /google\.|apple\.com|goo\.gl/i.test(t)) {
+    let u = t; try { u = decodeURIComponent(t); } catch (e) {}
+    if ((m = u.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/))) return ok(+m[1], +m[2]);   // 地點釘選（優先）
+    if ((m = u.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/))) return ok(+m[1], +m[2]);
+    if ((m = u.match(/[?&](?:q|query|ll|sll|daddr|destination|center|saddr|origin)=(-?\d+(?:\.\d+)?)[,\s+]+(-?\d+(?:\.\d+)?)/))) return ok(+m[1], +m[2]);
+    return null;
+  }
+  const dms = [...t.matchAll(/(\d+(?:\.\d+)?)\s*°\s*(?:(\d+(?:\.\d+)?)\s*['′’]\s*)?(?:(\d+(?:\.\d+)?)\s*(?:["″”]|'')\s*)?([NSEWnsew])?/g)];
+  if (dms.length >= 2) {
+    const conv = d => { let v = +d[1] + (+d[2] || 0) / 60 + (+d[3] || 0) / 3600; const h = (d[4] || '').toUpperCase(); if (h === 'S' || h === 'W') v = -v; return { v, h }; };
+    const a = conv(dms[0]), b = conv(dms[1]);
+    return (a.h === 'E' || a.h === 'W' || b.h === 'N' || b.h === 'S') ? ok(b.v, a.v) : ok(a.v, b.v);
+  }
+  if (/^[\s\d.,，;+-]+$/.test(t)) { const pr = parseCoordPair(t); if (pr) return ok(pr[0], pr[1]); }
+  return null;
+}
+const linkify = h => String(h).replace(/https?:\/\/[^\s<]+/g, u => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u.length > 42 ? u.slice(0, 40) + '…' : u}</a>`);   // 傳入已 esc 的文字
+function fullAddr(a) {   // Nominatim address → 台灣慣用寫法：縣市＋區＋路名＋幾號
+  if (!a) return '';
+  const adm = [], push = v => { v = String(v || '').trim(); if (v && !adm.includes(v)) adm.push(v); };
+  ['state', 'county', 'city', 'municipality'].forEach(k => { if (a[k] && /[縣市]$/.test(a[k])) push(a[k]); });
+  ['town', 'city_district', 'district', 'suburb', 'borough'].forEach(k => { if (a[k] && /[區鄉鎮市]$/.test(a[k])) push(a[k]); });
+  const road = a.road || a.pedestrian || a.path || '';
+  if (!road) return '';
+  return adm.join('') + road + (a.house_number ? houseNo(a.house_number) : '');
+}
+const TDX_KEY = 'personalMap.tdx';   // TDX 金鑰另存，不放進備份檔，避免外流
+const Tdx = {
+  tok: null, exp: 0,
+  creds() { try { const c = JSON.parse(localStorage.getItem(TDX_KEY) || 'null'); return c && c.id && c.secret ? c : null; } catch (e) { return null; } },
+  save(id, secret) { try { if (id && secret) localStorage.setItem(TDX_KEY, JSON.stringify({ id, secret })); else localStorage.removeItem(TDX_KEY); } catch (e) {} this.tok = null; },
+  CITY: { '臺北市': 'Taipei', '台北市': 'Taipei', '新北市': 'NewTaipei', '桃園市': 'Taoyuan', '臺中市': 'Taichung', '台中市': 'Taichung', '臺南市': 'Tainan', '台南市': 'Tainan', '高雄市': 'Kaohsiung', '基隆市': 'Keelung', '新竹市': 'Hsinchu', '新竹縣': 'HsinchuCounty', '苗栗縣': 'MiaoliCounty', '彰化縣': 'ChanghuaCounty', '南投縣': 'NantouCounty', '雲林縣': 'YunlinCounty', '嘉義市': 'Chiayi', '嘉義縣': 'ChiayiCounty', '屏東縣': 'PingtungCounty', '宜蘭縣': 'YilanCounty', '花蓮縣': 'HualienCounty', '臺東縣': 'TaitungCounty', '台東縣': 'TaitungCounty', '金門縣': 'KinmenCounty', '澎湖縣': 'PenghuCounty', '連江縣': 'LienchiangCounty' },
+  async token() {
+    if (this.tok && Date.now() < this.exp) return this.tok;
+    const c = this.creds(); if (!c) throw new Error('未設定 TDX 金鑰');
+    let r;
+    try { r = await fetch('https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `grant_type=client_credentials&client_id=${encodeURIComponent(c.id)}&client_secret=${encodeURIComponent(c.secret)}` }); }
+    catch (e) { throw new Error('TDX 登入連線失敗（可能被瀏覽器的跨來源限制擋住，或網路問題）'); }
+    if (!r.ok) throw new Error('TDX 金鑰驗證失敗（HTTP ' + r.status + '），請檢查 Client ID／Secret');
+    const j = await r.json(); this.tok = j.access_token; this.exp = Date.now() + Math.max(60, (j.expires_in || 3600) - 120) * 1000; return this.tok;
+  },
+  async get(path, center, rad) {   // 先用空間過濾；伺服器不支援時抓全部再自己篩距離
+    const tok = await this.token(), H = { headers: { Authorization: 'Bearer ' + tok } };
+    const base = 'https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/CCTV/' + path;
+    let j;
+    try { j = await Geo.json(`${base}?$spatialFilter=${encodeURIComponent(`nearby(${center.lat},${center.lng},${rad})`)}&$format=JSON`, H, 20000); }
+    catch (e) { j = await Geo.json(`${base}?$format=JSON`, H, 30000); }
+    const arr = Array.isArray(j) ? j : (j.CCTVs || j.CCTV || j.Data || []);
+    return arr.map(it => {
+      const lat = +(it.PositionLat ?? it.Positionlat ?? it.Latitude), lng = +(it.PositionLon ?? it.Positionlon ?? it.Longitude);
+      if (!isFinite(lat) || !isFinite(lng)) return null;
+      const road = [it.RoadName, it.LocationMile, it.RoadDirection].filter(Boolean).join(' ');
+      return { name: it.SurveillanceDescription || road || String(it.CCTVID || '路口監視器'), lat, lng, addr: road, tags: {}, hours: '', phone: '', limit: 0, osmId: 'tdx:' + (it.CCTVID || (lat + ',' + lng)),
+        cctv: { stream: it.VideoStreamURL || '', image: it.VideoImageURL || '', road } };
+    }).filter(Boolean).filter(x => hav(center, x) <= rad);
+  },
+  async search(center, rad) {   // → { items, note }
+    if (!this.creds()) return { items: [], note: '尚未設定 TDX 金鑰，只顯示 OpenStreetMap 資料（官方即時影像需在「設定」填入 TDX 金鑰）' };
+    const jobs = [['Freeway', '國道'], ['Highway', '省道']];
+    try {
+      const rv = await Geo.reverse(center.lat, center.lng), a = rv.address || {};
+      const key = [a.state, a.county, a.city, a.municipality].find(v => v && this.CITY[v]);
+      if (key) jobs.push(['City/' + this.CITY[key], key]);
+    } catch (e) {}
+    const out = [], errs = [];
+    await Promise.all(jobs.map(async ([path, label]) => { try { out.push(...await this.get(path, center, rad)); } catch (e) { errs.push(`${label}：${e.message}`); } }));
+    return { items: out, note: `TDX 官方影像 ${out.length} 處${errs.length ? '（部分來源失敗：' + errs.join('；') + '）' : ''}` };
+  }
+};
+function camLinks(r) {   // 影像連結：TDX 欄位或 OSM 標籤
+  const out = [], t = r.tags || {};
+  if (r.cctv && r.cctv.stream) out.push({ label: '▶ 即時影像', url: r.cctv.stream });
+  if (r.cctv && r.cctv.image) out.push({ label: '🖼 影像快照', url: r.cctv.image, img: true });
+  [['contact:webcam', '▶ 影像'], ['webcam', '▶ 影像'], ['image', '🖼 圖片'], ['url', '🔗 網址'], ['website', '🔗 網站'], ['contact:website', '🔗 網站']].forEach(([k, label]) => { if (/^https?:\/\//.test(t[k] || '') && !out.some(o => o.url === t[k])) out.push({ label, url: t[k], img: k === 'image' }); });
+  return out;
+}
+
 /* ---------------- 地址搜尋（查詢分頁與路線起終點共用）----------------
  * 流程：Nominatim 原文 → 結構化改寫（路名＋門牌＋行政區，台↔臺）→ Photon（第二資料來源）。
  * 有門牌時，必須結果地址含該門牌才算「相符」，否則繼續嘗試並標示「門牌未確認」。 */
@@ -925,7 +1007,8 @@ async function photonSearch(q, sc) {
   return ((j && j.features) || []).filter(f => (!cc || (f.properties.countrycode || '').toLowerCase() === cc.toLowerCase())
       && f.geometry.coordinates[0] >= lo && f.geometry.coordinates[0] <= hi && f.geometry.coordinates[1] >= sa && f.geometry.coordinates[1] <= na)
     .map(f => { const p = f.properties; return { name: p.name || [p.street, p.housenumber].filter(Boolean).join(' ') || q,
-      addr: [p.housenumber, p.street, p.district, p.city, p.state, p.country].filter(Boolean).join(', '), lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0] }; });
+      addr: [p.housenumber, p.street, p.district, p.city, p.state, p.country].filter(Boolean).join(', '), hn: p.housenumber,
+      full: p.street ? [p.city || p.state, p.district].filter(x => x && /[縣市區鄉鎮]$/.test(x)).join('') + p.street + (p.housenumber ? houseNo(p.housenumber) : '') : '', lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0] }; });
 }
 async function addrSearch(v, sc, progress) {
   progress = progress || (() => {});
@@ -936,12 +1019,12 @@ async function addrSearch(v, sc, progress) {
     if (cc) url += '&countrycodes=' + cc;
     if (box) url += `&viewbox=${box[0]},${box[1]},${box[2]},${box[3]}&bounded=1`; else url += `&viewbox=${b.getWest()},${b.getNorth()},${b.getEast()},${b.getSouth()}`;
     const j = await Geo.json(url);
-    return j.map(r => ({ name: String(r.name || r.display_name.split(',')[0]).trim(), addr: r.display_name, lat: +r.lat, lng: +r.lon }));
+    return j.map(r => ({ name: String(r.name || r.display_name.split(',')[0]).trim(), addr: r.display_name, full: fullAddr(r.address), hn: r.address && r.address.house_number, lat: +r.lat, lng: +r.lon }));
   };
   const pa = parseTwAddr(v), wantNo = !!(pa.no && (pa.road || pa.dist));
   const hit = r => wantNo && houseHit(r, pa.no);
   let list = [], fuzzy = false;
-  const merge = more => { for (const r of more) if (!list.some(x => Math.abs(x.lat - r.lat) < 1e-4 && Math.abs(x.lng - r.lng) < 1e-4)) list.push(r); };
+  const merge = more => { for (const r of more) if (!list.some(x => Math.abs(x.lat - r.lat) < 1e-4 && Math.abs(x.lng - r.lng) < 1e-4 && String(x.hn || '') === String(r.hn || ''))) list.push(r); };   // 相鄰門牌只差幾公尺，所以要門牌也相同才視為重複
   const done = () => list.length > 0 && (!wantNo || list.some(hit));
   merge(await nom(v));
   if (!done()) {
@@ -953,6 +1036,19 @@ async function addrSearch(v, sc, progress) {
       if (list.length && !wantNo) break;
     }
   }
+  const sameRoad = r => !!(pa.road && ((r.full || r.addr || '').replace(/臺/g, '台').includes(pa.road)));
+  if (wantNo && pa.road && !done()) {   // 路段找到了、但沒有該門牌：向 OSM 取同一條路上的相近門牌
+    const anchor = list.find(sameRoad) || list[0];
+    if (anchor) {
+      progress('📍 找不到該門牌，查詢同路段的相近門牌…');
+      try {
+        const rd = pa.road + (pa.sec || ''), els = await Geo.overpass(`[out:json][timeout:20];nwr["addr:housenumber"]["addr:street"~"^${rd.replace(/台/g, '[台臺]')}$"](around:900,${anchor.lat},${anchor.lng});out center tags 120;`, 20000);
+        const pre = (anchor.full && anchor.full.indexOf(pa.road) > 0) ? anchor.full.slice(0, anchor.full.indexOf(pa.road)) : '';
+        const pn0 = parseInt(pa.no), near = els.map(e => { const t = e.tags || {}, lt = e.lat ?? (e.center && e.center.lat), ln = e.lon ?? (e.center && e.center.lon); if (lt == null) return null; const n = parseInt(t['addr:housenumber']); return { name: (t['addr:street'] || rd) + houseNo(t['addr:housenumber']), addr: (pre + (t['addr:street'] || rd) + houseNo(t['addr:housenumber'])), full: pre + (t['addr:street'] || rd) + houseNo(t['addr:housenumber']), hn: t['addr:housenumber'], lat: lt, lng: ln, _d: isNaN(n) ? 1e9 : Math.abs(n - pn0) }; }).filter(Boolean).sort((a, b) => a._d - b._d).slice(0, 12);
+        merge(near); if (near.length) fuzzy = true;
+      } catch (e) {}
+    }
+  }
   if (!done()) {
     progress('🌐 改用第二個資料來源（Photon）查詢…');
     try {
@@ -961,8 +1057,9 @@ async function addrSearch(v, sc, progress) {
       if (list.length) fuzzy = true;
     } catch (e) {}
   }
-  list = list.map(r => ({ ...r, hit: wantNo ? !!hit(r) : null, dist: hav(ref, r) }));
-  list.sort((a, b) => ((b.hit === true) - (a.hit === true)) || a.dist - b.dist);
+  const pn = parseInt(pa.no);
+  list = list.map(r => { const n = parseInt(r.hn), nd = (wantNo && sameRoad(r) && !isNaN(n)) ? Math.abs(n - pn) : null; return { ...r, hit: wantNo ? !!hit(r) : null, dist: hav(ref, r), numDiff: nd, _k: nd == null ? null : nd + ((n % 2) !== (pn % 2) ? 0.5 : 0) }; });
+  list.sort((a, b) => ((b.hit === true) - (a.hit === true)) || (wantNo ? ((a._k == null) - (b._k == null)) || (a._k != null ? a._k - b._k : 0) : 0) || a.dist - b.dist);   // 有門牌：相符 → 同路段依號碼接近程度 → 其他依距離
   return { list, fuzzy, pa };
 }
 
@@ -978,8 +1075,9 @@ UI.addTab({
     const qIn = $('#qIn', el), st = $('#qSt', el), ul = $('#qList', el), qLayer = L.layerGroup().addTo(map);
     let results = [], refName = '';
     const draw = () => {
-      ul.innerHTML = results.map((r, i) => `<li class="wrap" data-i="${i}"><span class="ic">📍</span><div style="flex:1"><div class="t">${esc(r.name)}</div><div class="muted">${r.hit === true ? '✅ 門牌相符｜' : r.hit === false ? '⚠️ 門牌未確認｜' : ''}${r.dist != null ? '📏 ' + fmtDist(r.dist) + '｜' : ''}${esc(r.addr)}</div></div>
-        <div class="btns"><button type="button" data-a="go">前往</button><button type="button" data-a="nav">🧭 導航</button><button type="button" data-a="add">＋ 新增標記</button><button type="button" data-a="fav">⭐ 常用</button></div></li>`).join('');
+      ul.innerHTML = results.map((r, i) => `<li class="wrap" data-i="${i}"><span class="ic">📍</span><div style="flex:1;min-width:0"><div class="t">${esc(r.full || r.name)}</div>
+        <div class="muted">${r.hit === true ? '✅ 門牌相符｜' : r.hit === false ? '⚠️ 門牌未確認｜' : ''}${r.numDiff != null && r.hit !== true ? `與查詢相差 ${r.numDiff} 號｜` : ''}${r.full && r.name && !r.full.includes(r.name) ? esc(r.name) + '｜' : ''}${r.dist != null ? '📏 ' + fmtDist(r.dist) + '｜' : ''}${r.full ? llText(r) : esc(r.addr)}</div></div>
+        <div class="btns"><button type="button" data-a="go">前往</button><button type="button" data-a="cp">📋 複製座標</button><button type="button" data-a="ca">📋 複製地址</button><button type="button" data-a="nav">🧭 導航</button><button type="button" data-a="add">＋ 新增標記</button><button type="button" data-a="fav">⭐ 常用</button></div></li>`).join('');
     };
     const go = i => {
       const r = results[i]; if (!r) return;
@@ -993,10 +1091,11 @@ UI.addTab({
     const run = async over => {
       const v = qIn.value.trim(); if (!v) return;
       askBox.innerHTML = ''; showScope();
-      const cp = parseCoordPair(v);
-      if (cp && /^[-+\d.\s,，]+$/.test(v) && Math.abs(cp[0]) <= 90 && Math.abs(cp[1]) <= 180) {
-        results = [{ name: '座標', addr: `${cp[0]}, ${cp[1]}`, lat: cp[0], lng: cp[1], raw: true }]; st.textContent = ''; draw(); go(0); return;
+      const ll0 = extractLatLng(v);
+      if (ll0) {
+        results = [{ name: '座標', addr: `${ll0.lat}, ${ll0.lng}`, lat: ll0.lat, lng: ll0.lng, raw: true }]; st.textContent = ''; draw(); go(0); return;
       }
+      if (/goo\.gl|maps\.app/i.test(v)) { st.textContent = '短網址無法解析，請先在瀏覽器開啟，再複製完整網址貼上。'; return; }
       const sc = over || Store.state.settings.scope;
       st.textContent = '⏳ 查詢中…'; ul.innerHTML = '';
       try {
@@ -1027,8 +1126,10 @@ UI.addTab({
     ul.onclick = e => {
       const li = e.target.closest('li[data-i]'); if (!li) return;
       const i = +li.dataset.i, r = results[i], a = e.target.dataset.a;
-      if (a === 'add') Form.openNew({ lat: r.lat, lng: r.lng }, { name: r.raw ? '' : r.name, addr: r.raw ? '' : r.addr });
-      else if (a === 'nav') Hooks.navigateTo({ lat: r.lat, lng: r.lng, name: r.raw ? r.addr : r.name, addr: r.raw ? '' : r.addr, named: !r.raw });
+      if (a === 'cp') copyText(llText(r));
+      else if (a === 'ca') copyText(r.full || r.addr);
+      else if (a === 'add') Form.openNew({ lat: r.lat, lng: r.lng }, { name: r.raw ? '' : r.name, addr: r.raw ? '' : (r.full || r.addr) });
+      else if (a === 'nav') Hooks.navigateTo({ lat: r.lat, lng: r.lng, name: r.raw ? r.addr : (r.full || r.name), addr: r.raw ? '' : (r.full || r.addr), named: !r.raw });
       else if (a === 'fav') Places.add({ name: r.raw ? r.addr : r.name, lat: r.lat, lng: r.lng });
       else go(i);
     };
@@ -1212,7 +1313,7 @@ UI.addTab({
       <div class="muted" id="rSt"></div>
       <div id="rSum"></div><div id="rRem"></div><div id="rCams"></div><div id="rSteps"></div>
       <h4>已儲存路線</h4><ul class="items" id="rSaved"></ul>`;
-    const R = { profile: Router.PROFILES[Store.state.settings.routeProfile] ? Store.state.settings.routeProfile : 'moto', pts: [null, null], route: null, tok: 0, when: 'now', dt: '', holiday: false, camList: [], metric: null, said: new Set(), remText: '', lastShown: null };
+    const R = { profile: Router.PROFILES[Store.state.settings.routeProfile] ? Store.state.settings.routeProfile : 'moto', pts: [null, null], route: null, tok: 0, when: 'now', dt: '', holiday: false, camList: [], metric: null, said: new Set(), remText: '', lastShown: null, short: {}, shareApple: false, shortOk: false };
     const lineLayer = L.layerGroup().addTo(map), ptLayer = L.layerGroup().addTo(map), camLayer = L.layerGroup().addTo(map);
     const stepsBox = $('#rSteps', el), stepLayer = L.layerGroup().addTo(map), st = $('#rSt', el), sum = $('#rSum', el), camBox = $('#rCams', el), ptsBox = $('#rPts', el), chBox = $('#rCh', el);
     const letter = i => String.fromCharCode(65 + i);
@@ -1274,7 +1375,7 @@ UI.addTab({
       items = [
         ...favs.map(p => ({ ic: '⭐', name: p.name, sub: '常用地點', lat: p.lat, lng: p.lng })),
         ...mks.map(m => ({ ic: Cats.get(m.catId).emoji, name: m.name, sub: m.addr || '已存標記', addr: m.addr || '', named: true, lat: m.lat, lng: m.lng, ref: m.id })),
-        ...nomRes.map(r => ({ ic: '🔎', name: r.name, sub: (r.hit === true ? '✅ 門牌相符｜' : r.hit === false ? '⚠️ 門牌未確認｜' : '') + r.addr, addr: r.addr, named: true, lat: r.lat, lng: r.lng }))
+        ...nomRes.map(r => ({ ic: '🔎', name: r.full || r.name, sub: (r.hit === true ? '✅ 門牌相符｜' : r.hit === false ? '⚠️ 門牌未確認｜' : '') + (r.full || r.addr), addr: r.full || r.addr, named: true, lat: r.lat, lng: r.lng }))
       ];
       ul.innerHTML = items.map((x, k) => `<li data-k="${k}"><span class="ic">${esc(x.ic)}</span><div style="min-width:0"><div class="t">${esc(x.name)}</div><div class="muted">${esc(x.sub)}</div></div></li>`).join('')
         || '<li class="muted" style="cursor:default">沒有符合的項目，可按「搜尋」查地址或名稱</li>';
@@ -1282,8 +1383,8 @@ UI.addTab({
     const openCh = i => { chI = i; nomRes = []; renderCh(); const q = $('#rQ', chBox); if (q) q.focus(); };
     const searchNom = async () => {
       const inp = $('#rQ', chBox), qs = $('#rQst', chBox), v = inp.value.trim(); if (!v) return;
-      const cp = parseCoordPair(v);
-      if (cp && /^[-+\d.\s,，]+$/.test(v) && Math.abs(cp[0]) <= 90 && Math.abs(cp[1]) <= 180) return setPoint(chI, { lat: cp[0], lng: cp[1], name: `${cp[0]}, ${cp[1]}` });
+      const ll0 = extractLatLng(v);
+      if (ll0) return setPoint(chI, { lat: ll0.lat, lng: ll0.lng, name: `${ll0.lat}, ${ll0.lng}` });
       qs.textContent = '⏳ 查詢中…';
       try {
         const sc = Store.state.settings.scope, rs = await addrSearch(v, sc, t => { qs.textContent = t; });
@@ -1330,7 +1431,8 @@ UI.addTab({
         <div class="row" style="margin-top:8px"><button type="button" class="primary" data-a="save">💾 儲存路線</button><button type="button" data-a="redo">🔄 重新規劃</button></div>
         <div class="muted" style="margin-top:8px">📤 開啟或分享給其他地圖 App（Google／Apple 會用自己的演算法重算路線，起終點與中途點會帶過去）</div>
         <label style="margin:6px 0 0">地點傳給地圖 App 的方式<select id="rShareMode"><option value="text" ${Store.state.settings.shareMode !== 'coord' ? 'selected' : ''}>店名／地址（有的話；讓 Google 自己找到那間店）</option><option value="coord" ${Store.state.settings.shareMode === 'coord' ? 'selected' : ''}>座標（精確位置，但 Google 可能標成附近的別間店）</option></select></label>
-        <div class="row" style="margin-top:4px"><button type="button" data-a="gmap">🗺️ Google 地圖</button><button type="button" data-a="amap">🍎 Apple 地圖</button><button type="button" data-a="share">📤 分享</button><button type="button" data-a="copy">📋 複製連結</button></div></div>`;
+        <div class="row" style="margin-top:4px"><button type="button" data-a="gmap">🗺️ Google 地圖</button><button type="button" data-a="amap">🍎 Apple 地圖</button><button type="button" data-a="share">📤 分享</button><button type="button" data-a="copy">📋 複製連結</button></div>
+        <div class="row" style="margin-top:6px;align-items:center"><button type="button" data-a="short">🔗 縮短網址</button><label style="display:flex;gap:6px;align-items:center;color:var(--fg);margin:0"><input type="checkbox" id="rShareApple" style="width:auto;margin:0" ${R.shareApple ? 'checked' : ''}> 分享文字附上 Apple 地圖連結</label></div></div>`;
       if (R.lastShown !== r) { R.lastShown = r; R.said = new Set(); R.metric = routeMetric(r.geometry); }
       drawCams(r); drawSteps(r); renderRem();
       if (fit) map.fitBounds(L.latLngBounds(r.geometry), { padding: [30, 30] });
@@ -1377,7 +1479,7 @@ UI.addTab({
     holIn.onchange = () => { R.holiday = holIn.checked; rerender(); };
     /* 分享／開啟其他地圖 App */
     const mapLinks = explicit => {
-      const pt = R.pts, ll = x => `${(+x.lat).toFixed(6)},${(+x.lng).toFixed(6)}`, last = pt[pt.length - 1], mid = pt.slice(1, -1);
+      const pt = R.pts, ll = x => `${(+x.lat).toFixed(5)},${(+x.lng).toFixed(5)}`, last = pt[pt.length - 1], mid = pt.slice(1, -1);
       const byText = Store.state.settings.shareMode !== 'coord';   // 預設：有店名／地址的點，用文字讓 Google 自己找到那間店；否則用座標
       const place = x => {
         if (byText && x.named && (x.addr || x.name)) return encodeURIComponent(x.addr && x.name && x.addr.includes(x.name) ? x.addr : [x.name, x.addr].filter(Boolean).join(' '));
@@ -1391,9 +1493,24 @@ UI.addTab({
     };
     const shareBlock = () => {
       const pt = R.pts, L2 = mapLinks(true), r = R.route, dep = departDate(), sec = (R.profile === 'driving' || R.profile === 'moto') ? adjustDuration(r, dep, R.holiday, R.profile === 'moto' ? 0.5 : 1).sec : r.duration;
-      return { title: `路線：${pt[0].name} → ${pt[pt.length - 1].name}`, text: `🧭 ${pt[0].name} → ${pt[pt.length - 1].name}\n${Router.PROFILES[R.profile].label}｜${fmtDist(r.distance)}｜約 ${fmtDur(sec)}\nGoogle 地圖：${L2.g}\nApple 地圖：${L2.a}\n📍 終點精確位置（釘選點）：${gLink(pt[pt.length - 1].lat, pt[pt.length - 1].lng)}` };
+      const last = pt[pt.length - 1], pin = gLink(last.lat, last.lng), sh = u => R.short[u] || u;
+      return { title: `路線：${pt[0].name} → ${last.name}`, text: `🧭 ${pt[0].name} → ${last.name}\n${Router.PROFILES[R.profile].label}｜${fmtDist(r.distance)}｜約 ${fmtDur(sec)}\nGoogle 地圖：${sh(L2.g)}${R.shareApple ? '\nApple 地圖：' + sh(L2.a) : ''}\n📍 終點精確位置：${sh(pin)}` };
     };
-    sum.onchange = e => { if (e.target.id === 'rShareMode') { Store.state.settings.shareMode = e.target.value; Store.save(); toast('✓ 已自動儲存', 1200); } };
+    const shorten = async url => {   // 免費短網址服務；失敗就換下一個
+      for (const mk of [u => `https://is.gd/create.php?format=simple&url=${encodeURIComponent(u)}`, u => `https://tinyurl.com/api-create.php?url=${encodeURIComponent(u)}`]) {
+        try { const r = await fetch(mk(url)); const t = (await r.text()).trim(); if (/^https?:\/\/[^\s]+$/.test(t)) return t; } catch (e) {}
+      }
+      throw new Error('短網址服務連線失敗');
+    };
+    const doShorten = async () => {
+      if (!R.route || R.pts.some(x => !x)) return;
+      if (!R.shortOk && !confirm('縮短網址會把路線連結（含起點、終點座標或名稱）送到 is.gd／tinyurl 這類第三方服務。要繼續嗎？')) return;
+      R.shortOk = true; toast('🔗 產生短網址中…', 4000);
+      const L2 = mapLinks(true), last = R.pts[R.pts.length - 1], urls = [L2.g, gLink(last.lat, last.lng)].concat(R.shareApple ? [L2.a] : []);
+      try { for (const u of urls) if (!R.short[u]) R.short[u] = await shorten(u); toast('✅ 已產生短網址，之後「分享」「複製連結」會使用短網址', 3500); }
+      catch (e) { toast('❌ ' + e.message + '；可改取消勾選 Apple 連結或改用座標方式，連結會短很多', 4500); }
+    };
+    sum.onchange = e => { if (e.target.id === 'rShareApple') { R.shareApple = e.target.checked; return; } if (e.target.id === 'rShareMode') { Store.state.settings.shareMode = e.target.value; Store.save(); toast('✓ 已自動儲存', 1200); } };
     sum.onclick = e => {
       const a = e.target.dataset.a; if (!a) return;
       if (a === 'redo') plan();
@@ -1403,6 +1520,7 @@ UI.addTab({
       else if (a === 'amap') window.open(mapLinks(false).a, '_blank', 'noopener');
       else if (a === 'share') shareText(shareBlock());
       else if (a === 'copy') copyText(shareBlock().text);
+      else if (a === 'short') doShorten();
     };
     /* 測速提醒：行駛中以 GPS 判斷路線上前方的測速照相，靠近時警示 */
     const Rem = { id: null, wake: null, ctx: null, hide: null };
@@ -1560,7 +1678,10 @@ const PRESETS = [
     q: ['["railway"="station"]["station"~"^(subway|light_rail)$"]', '["public_transport"="station"]["subway"="yes"]', '["railway"="station"]["network"~"捷運|MRT|Metro"]'],
     match: t => t.station === 'subway' || t.station === 'light_rail' || t.subway === 'yes' || /捷運|MRT|Metro/.test(t.network || '') },
   { id: 'bus', label: '公車站牌', emoji: '🚌', color: '#0d9488', cat: 'busstop', transit: true,
-    q: ['["highway"="bus_stop"]', '["public_transport"="platform"]["bus"="yes"]'], match: t => t.highway === 'bus_stop' || (t.public_transport === 'platform' && t.bus === 'yes') }
+    q: ['["highway"="bus_stop"]', '["public_transport"="platform"]["bus"="yes"]'], match: t => t.highway === 'bus_stop' || (t.public_transport === 'platform' && t.bus === 'yes') },
+  { id: 'cctv', label: '路口監視器', emoji: '📹', color: '#0f766e', cat: 'cctv', opt: true,
+    q: ['["man_made"="surveillance"]["surveillance"~"^(public|outdoor)$"]', '["man_made"="surveillance"]["surveillance:zone"~"traffic|town|street"]', '["man_made"="surveillance"]["contact:webcam"]'],
+    match: t => t.man_made === 'surveillance' }
 ];
 const ensurePresetCat = p => {
   const c = Cats.ensure({ id: p.cat, name: p.label, emoji: p.emoji, color: p.color });
@@ -1574,6 +1695,7 @@ UI.addTab({
   init(el) {
     el.innerHTML = `<p class="muted">以某點為中心，向 OpenStreetMap 查詢半徑內的店家／設施，直接標在地圖上。預設以目前 GPS 為中心（藍色按鈕＝目前使用的中心來源）。</p>
       <div class="row" style="margin-bottom:8px"><button type="button" class="srcbtn" id="nGps">🛰️ 目前 GPS</button><button type="button" class="srcbtn" id="nPick">📍 地圖點選</button></div>
+      <div class="row" style="flex-wrap:nowrap;margin-bottom:8px"><input id="nPaste" placeholder="貼上座標或 Google 地圖網址（例：25.03, 121.56）" style="flex:1"><button type="button" id="nPasteGo">設為中心</button></div>
       <label>或使用常用地點<select id="nPlace"></select></label>
       <div class="muted" id="nCenter">尚未設定中心點</div>
       <div class="hrsbox" style="margin-top:8px"><b>📍 目前定位座標</b>
@@ -1617,20 +1739,36 @@ UI.addTab({
     R.oninput = () => { q('#nRv').textContent = R.value; drawCenter(); };
     q('#nGps').onclick = () => useGps(true);
     q('#nPick').onclick = () => { App.pick = ll => setCenter(ll, '地圖點選', 'pick'); toast('請在地圖上單擊選擇中心點'); };
+    const doPaste = () => {
+      const v = q('#nPaste').value.trim(); if (!v) return;
+      const ll = extractLatLng(v);
+      if (!ll) return toast(/goo\.gl|maps\.app/i.test(v) ? '短網址無法解析，請先在瀏覽器開啟，再複製完整網址' : '看不懂這個座標，格式例：25.03, 121.56 或 Google 地圖網址', 3500);
+      setCenter(ll, '貼上座標', 'paste'); map.flyTo([ll.lat, ll.lng], defZoom());
+    };
+    q('#nPasteGo').onclick = doPaste; q('#nPaste').addEventListener('keydown', e => { if (e.key === 'Enter') doPaste(); });
     plSel.onchange = () => { const p = Store.state.places.find(x => x.id === plSel.value); if (p) { setCenter(p, p.name, 'place'); map.flyTo([p.lat, p.lng], defZoom()); } };
     this.onShow = () => { if (!center && !tried) { tried = true; useGps(false); } };   // 第一次進入「附近」自動使用目前 GPS
 
-    const toMarker = r => ({ name: r.name, catId: r.p.cat, rating: 0, note: r.phone ? '電話：' + r.phone : '', lat: r.lat, lng: r.lng, addr: r.addr, hours: r.hours, speedLimit: r.limit || 0, src: 'osm', osmId: r.osmId });
+    const toMarker = r => ({ name: r.name, catId: r.p.cat, rating: 0, note: [r.phone ? '電話：' + r.phone : '', ...camLinks(r).map(l => `${l.label.replace(/^\S+\s/, '')}：${l.url}`)].filter(Boolean).join('\n'), lat: r.lat, lng: r.lng, addr: r.addr, hours: r.hours, speedLimit: r.limit || 0, src: 'osm', osmId: r.osmId });
     const addMany = rs => { rs.forEach(r => ensurePresetCat(r.p)); const bid = 'b_' + uid(), bn = `附近搜尋：${rs.length === 1 ? rs[0].p.label : (catSel.value === 'all' ? '多類別' : rs[0].p.label)}（${fmtDate(Date.now())}）`; const x = Markers.addMany(rs.map(r => ({ ...toMarker(r), batch: bid, batchName: bn }))); toast(`已加入 ${x.n} 筆` + (x.dup ? `，略過重複 ${x.dup} 筆` : '')); };
     const popupFor = r => {
       const d = document.createElement('div'); d.className = 'pp';
+      const cl = camLinks(r), img = cl.find(x => x.img && /^https:/.test(x.url));
       d.innerHTML = `<h3>${esc(r.p.emoji)} ${esc(r.name)}</h3><div class="muted">${esc(r.p.label)}｜距中心 ${fmtDist(r.dist)}</div>
         ${r.addr ? `<div class="muted">📮 ${esc(r.addr)}</div>` : ''}
-        ${r.hours ? `<div>🕒 ${esc(r.hours)}</div>` : '<div class="muted">🕒 OSM 無營業時間資料</div>'}
+        ${r.p.id === 'cctv' ? '' : (r.hours ? `<div>🕒 ${esc(r.hours)}</div>` : '<div class="muted">🕒 OSM 無營業時間資料</div>')}
         ${r.phone ? `<div class="muted">☎ ${esc(r.phone)}</div>` : ''}
         ${r.limit ? `<div>🚦 速限 <b>${r.limit}</b> km/h</div>` : ''}
-        <div class="row"><button class="primary" data-a="add">＋ 加入我的標記</button></div>`;
-      d.onclick = e => { if (e.target.dataset.a === 'add') { addMany([r]); } };
+        ${img ? `<div style="margin:6px 0"><img src="${esc(img.url)}" alt="影像快照" loading="lazy" referrerpolicy="no-referrer" style="max-width:100%;border-radius:6px" onerror="this.style.display='none'"></div>` : ''}
+        ${cl.length ? `<div class="row" style="margin:6px 0">${cl.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.label)}</a>`).join('　')}</div>` : (r.p.id === 'cctv' ? '<div class="muted">此點在資料來源中沒有影像連結</div>' : '')}
+        <div class="muted">${llText(r)}</div>
+        <div class="row"><button class="primary" data-a="add">＋ 加入我的標記</button><button data-a="copy">📋 座標</button><button data-a="nav">🧭 導航</button></div>`;
+      d.onclick = e => {
+        const a = e.target.dataset.a;
+        if (a === 'add') addMany([r]);
+        else if (a === 'copy') copyText(llText(r));
+        else if (a === 'nav') Hooks.navigateTo({ lat: r.lat, lng: r.lng, name: r.name, addr: r.addr, named: true });
+      };
       return d;
     };
     const clear = () => { layer.clearLayers(); results = []; ul.innerHTML = ''; st.textContent = ''; q('#nAll').style.display = 'none'; };
@@ -1647,17 +1785,27 @@ UI.addTab({
       st.textContent = '⏳ 查詢中…（範圍大或分類多時可能需要十幾秒）';
       q('#nGo').disabled = true;
       try {
-        const els = await Geo.overpass(`[out:json][timeout:30];(${parts.join('')});out center tags 400;`);
+        let els = [], osmFail = false;
+        try { els = await Geo.overpass(`[out:json][timeout:30];(${parts.join('')});out center tags 400;`); }
+        catch (e) { if (catSel.value !== 'cctv' || !Tdx.creds()) throw e; osmFail = true; }
         const seen = new Set();
         results = els.filter(e => !seen.has(e.type + e.id) && seen.add(e.type + e.id)).map(e => Geo.toPlace(e)).filter(Boolean)
           .map(p => { const pr = sel.find(x => x.match(p.tags)) || PRESETS.find(x => x.match(p.tags)) || sel[0]; return { ...p, p: pr, dist: hav(center, p), name: p.name === '（未命名）' ? pr.label : p.name }; })
           .sort((a, b) => a.dist - b.dist);
+        let tdxNote = '';
+        if (catSel.value === 'cctv') {
+          const cp = PRESETS.find(x => x.id === 'cctv'), t = await Tdx.search(center, rad);
+          results = results.concat(t.items.map(x => ({ ...x, p: cp, dist: hav(center, x) }))).sort((a, b) => a.dist - b.dist);
+          tdxNote = t.note + (osmFail ? '；OSM 查詢失敗' : '');
+        }
         results.forEach(r => {
           L.marker([r.lat, r.lng], { icon: Cats.icon(r.p), title: r.name }).bindPopup(() => popupFor(r)).addTo(layer);
         });
         st.textContent = results.length ? `找到 ${results.length} 個地點${results.length >= 400 ? '（已達上限 400，請縮小半徑）' : ''}（資料來自 OpenStreetMap，可能不完整${catSel.value === 'shopee' ? '；蝦皮店到店在 OSM 的標註很少，查不齊時可改用「匯入」清單' : ''}${catSel.value === 'speedcam' ? '；OSM 的測速照相不一定完整，政府「測速執法設置點」資料更齊，可用「匯入」' : ''}）` : '範圍內沒有找到，試試放大半徑或換分類';
+        if (tdxNote) st.textContent += '｜' + tdxNote;
+        if (catSel.value === 'cctv') st.textContent += '｜OSM 的監視器資料很少且多半沒有影像，官方即時影像請用 TDX 金鑰';
         ul.innerHTML = results.slice(0, 100).map((r, i) => `<li data-i="${i}"><span class="ic">${esc(r.p.emoji)}</span><div><div class="t">${esc(r.name)}</div>
-          <div class="muted">${esc(r.p.label)}｜${fmtDist(r.dist)}${r.hours ? '｜🕒 ' + esc(r.hours) : ''}</div></div></li>`).join('');
+          <div class="muted">${esc(r.p.label)}｜${fmtDist(r.dist)}${r.hours ? '｜🕒 ' + esc(r.hours) : ''}${camLinks(r).length ? '｜📹 有影像連結' : ''}</div></div></li>`).join('');
         if (results.length) { const b = q('#nAll'); b.style.display = ''; b.textContent = `＋ 全部加入我的標記（${results.length}）`; }
         // 不自動縮放／移動地圖：維持查詢前的畫面與縮放比例
       } catch (e) { st.textContent = '❌ 查詢失敗或逾時（Overpass 伺服器忙碌），請稍後再試或縮小半徑／分類。'; }
@@ -1983,6 +2131,10 @@ UI.addTab({
         <div class="muted" style="margin:4px 0 8px">先限制國家，再限制區域，避免搜尋結果跑到別的國家。查無資料時會先模糊比對，再詢問是否擴大範圍。區域邊界為粗略範圍。</div>
         <label>國家<select id="sCtry"></select></label>
         <label>區域<select id="sReg"></select></label></div>
+      <div class="hrsbox"><b>📹 路口監視器資料來源（選用）</b>
+        <div class="muted" style="margin:4px 0 8px">官方即時影像來自交通部 TDX（免費，需到 tdx.transportdata.tw 註冊並建立 Client ID／Secret）。金鑰只存在這個瀏覽器，不會放進匯出的備份檔。沒填金鑰時，「附近 → 路口監視器」只顯示 OpenStreetMap 的資料（很少）。</div>
+        <label>Client ID<input id="sTi" autocomplete="off"></label><label>Client Secret<input id="sTs" type="password" autocomplete="off"></label>
+        <div class="row"><button type="button" id="sTsave" class="primary">儲存金鑰</button><button type="button" id="sTclr">清除</button><button type="button" id="sTtest">測試連線</button></div><div class="muted" id="sTst"></div></div>
       <label>長按地圖的時間（秒，0.4～2）<input type="number" id="sLp" min="0.4" max="2" step="0.1"></label>
       <label style="display:flex;gap:6px;align-items:center;color:var(--fg)"><input type="checkbox" id="sGeo" style="width:auto;margin:0"> 點擊地圖新增標記時，自動查詢地名（Nominatim）</label>
       <p class="muted">地圖右下角的＋－與滑桿可隨時手動調整縮放。GPS 定位需要 https 或 localhost。</p>`;
@@ -2004,6 +2156,11 @@ UI.addTab({
     rr.onchange = () => { S().searchRadiusKm = Math.min(5, Math.max(0.1, +rr.value || 2)); save(); fill(); };
     geo.onchange = () => { S().autoGeocode = geo.checked; save(); };
     rp.onchange = () => { S().routeProfile = rp.value; save(); };
+    const tI = q('#sTi'), tS = q('#sTs'), tSt = q('#sTst');
+    { const c = Tdx.creds(); if (c) { tI.value = c.id; tS.value = c.secret; tSt.textContent = '已儲存金鑰'; } }
+    q('#sTsave').onclick = () => { Tdx.save(tI.value.trim(), tS.value.trim()); tSt.textContent = Tdx.creds() ? '✅ 已儲存金鑰（僅存在這個瀏覽器）' : '請填入 Client ID 與 Secret'; };
+    q('#sTclr').onclick = () => { Tdx.save('', ''); tI.value = ''; tS.value = ''; tSt.textContent = '已清除'; };
+    q('#sTtest').onclick = async () => { Tdx.save(tI.value.trim(), tS.value.trim()); tSt.textContent = '⏳ 測試中…'; try { await Tdx.token(); tSt.textContent = '✅ 登入成功（影像資料是否有，要到「附近 → 路口監視器」查）'; } catch (e) { tSt.textContent = '❌ ' + e.message; } };
     mc.onchange = () => { S().motoCapKmh = Math.min(90, Math.max(25, +mc.value || 50)); save(); fill(); };
     me.onchange = () => { S().motoEff = Math.min(1, Math.max(0.5, +me.value || 0.8)); save(); fill(); };
     const cSel = q('#sCtry'), rSel = q('#sReg');
