@@ -1064,6 +1064,7 @@ async function addrSearch(v, sc, progress) {
 }
 
 /* ---------------- 共用：地點搜尋欄（貼上標記／地址／名稱／座標，可連續查詢）---------------- */
+const gSearchHelp = v => `<br>👉 <a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(v)}" target="_blank" rel="noopener">用 Google 地圖查「${esc(v)}」</a>：找到後點選該處，複製網址列的網址（或長按地圖取座標），貼回上方欄位即可。`;
 function mountPlaceFinder(root, o) {
   root.innerHTML = `<div class="row" style="flex-wrap:nowrap;margin-bottom:6px"><input type="search" data-r="q" placeholder="${esc(o.placeholder || '')}" style="flex:1;min-width:0"><button type="button" class="primary" data-a="go">搜尋</button><button type="button" data-a="clr" title="清除欄位與結果">✕ 清除</button></div><div class="muted" data-r="st"></div><ul class="items" data-r="ul"></ul>`;
   const inp = root.querySelector('[data-r=q]'), st = root.querySelector('[data-r=st]'), ul = root.querySelector('[data-r=ul]');
@@ -1091,6 +1092,7 @@ function mountPlaceFinder(root, o) {
       nomRes = rs.list; fill();
       const hits = nomRes.filter(r => r.hit).length;
       st.textContent = nomRes.length ? `找到 ${nomRes.length} 筆${rs.pa.no ? (hits ? `｜✅ 門牌相符 ${hits} 筆` : '｜⚠️ 找不到相同門牌，列出最接近的結果') : ''}，點選一筆即可（範圍：${scopeLabel(sc)}）` : `在「${scopeLabel(sc)}」內查無資料，可到「設定」放寬查詢範圍`;
+      if (!nomRes.length || (rs.pa.no && !hits)) st.innerHTML = esc(st.textContent) + gSearchHelp(v);
     } catch (e) { st.textContent = '❌ 查詢失敗或逾時，請稍後再試'; }
   };
   const clear = () => { inp.value = ''; nomRes = []; items = []; st.textContent = ''; ul.innerHTML = ''; inp.focus(); };
@@ -1146,9 +1148,10 @@ UI.addTab({
         if (results.length) {
           const hits = results.filter(r => r.hit).length;
           st.textContent = `找到 ${results.length} 筆${rs.fuzzy ? '（含模糊比對結果，請確認是否正確）' : ''}${rs.pa.no ? (hits ? `｜✅ 門牌相符 ${hits} 筆（排在最前）` : '｜⚠️ 找不到相同門牌，已列出最接近的路段／地點，可前往後在地圖長按微調位置') : ''}｜範圍：${scopeLabel(sc)}｜依距離由近到遠（基準：${refName}）`;
+          if (rs.pa.no && !hits) st.innerHTML = esc(st.textContent) + gSearchHelp(v);
           go(0); return;
         }
-        st.textContent = `在「${scopeLabel(sc)}」內查無資料（已做模糊比對）。`;
+        st.innerHTML = esc(`在「${scopeLabel(sc)}」內查無資料（已做模糊比對）。`) + gSearchHelp(v);
         const wider = widerScope(sc);
         if (wider) {
           askBox._wider = wider;
@@ -1191,6 +1194,7 @@ UI.addTab({
  * 想換成自架或其他 OSRM：在匯出的 JSON 或程式中設定 settings.routeBase，例如
  *   'https://你的伺服器/route/v1/driving/'（可用 {p} 代入 routed-car / routed-bike / routed-foot）。
  * 路線資料以 [[lat,lng],…] 折線儲存，階段四的控制點拖曳與軌跡回放直接沿用。 */
+const HWY_RE = /國道|高速公路|快速公路|快速道路|^國\d|^N\d|^(台|臺|T)(61|62|64|65|66|68|72|74|76|78|82|84|86|88)(線)?$/i;
 const Router = {
   PROFILES: {
     moto: { label: '🛵 機車', path: 'routed-car', moto: true },   // 以汽車路網為基礎，另行估算機車時間
@@ -1203,7 +1207,7 @@ const Router = {
   async route(profile, pts) {
     const P = this.PROFILES[profile], coords = pts.map(p => (+p.lng).toFixed(6) + ',' + (+p.lat).toFixed(6)).join(';');
     const call = async extra => {
-      const url = this.base(profile) + coords + '?overview=full&geometries=geojson&steps=true&alternatives=false' + extra;
+      const url = this.base(profile) + coords + '?overview=full&geometries=geojson&steps=true&alternatives=' + (P.moto ? 'true' : 'false') + extra;
       const ac = new AbortController(), timer = setTimeout(() => ac.abort(), 20000);
       let r;
       try { r = await fetch(url, { signal: ac.signal }); }
@@ -1227,22 +1231,25 @@ const Router = {
       if (r.status === 429) throw new Error('路線伺服器忙碌（請求過於頻繁），請稍後再試');
       throw new Error('路線規劃失敗（' + (c || ('HTTP ' + r.status)) + '）');
     }
-    const rt = j.routes[0], steps = [];
+    const isHwy = x => HWY_RE.test(x.name || '') || HWY_RE.test(x.ref || '');
+    let pickI = 0;
+    if (P.moto) { const k = j.routes.findIndex(x => !(x.legs || []).some(l => (l.steps || []).some(isHwy))); if (k > 0) pickI = k; }   // 機車：優先選不經國道／快速道路的替代路線
+    const rt = j.routes[pickI], steps = [];
     rt.legs.forEach((leg, li) => (leg.steps || []).forEach(s => steps.push({
       leg: li, type: s.maneuver.type, mod: s.maneuver.modifier || '', name: s.name || '', ref: s.ref || '',
       dist: s.distance, dur: s.duration, loc: [s.maneuver.location[1], s.maneuver.location[0]], exit: s.maneuver.exit || 0
     })));
     const out = { geometry: rt.geometry.coordinates.map(c => [c[1], c[0]]), distance: rt.distance, duration: rt.duration, steps };
     if (P.moto) {   // 機車時間：每一步以「汽車速度」為基礎，套用速度上限與停等折減，再加轉彎延遲
-      const S = Store.state.settings, cap = (S.motoCapKmh || 50) / 3.6, eff = S.motoEff || 0.8; let tot = 0;
+      const S = Store.state.settings, cap = (S.motoCapKmh || 50) / 3.6, eff = S.motoEff || 0.8, cal = S.motoCal || 1; let tot = 0;
       steps.forEach(st => {
         if (st.dist > 0) st.dur = st.dist / ((st.dur > 0 ? Math.min(st.dist / st.dur, cap) : cap) * eff);
         if (st.type !== 'depart' && st.type !== 'arrive') st.dur += 3;
-        tot += st.dur;
+        st.dur *= cal; tot += st.dur;
       });
-      out.duration = steps.length ? tot : rt.distance / (cap * eff);
+      out.duration = steps.length ? tot : rt.distance / (cap * eff) * cal; out.altUsed = pickI > 0;
       out.moto = true; out.avoidMotorway = avoided;
-      out.hwy = steps.some(st => /國道|高速公路|快速公路|快速道路|^國\d|^N\d/i.test((st.name || '') + ' ' + (st.ref || '')));
+      out.hwy = steps.some(isHwy);
     }
     return out;
   }
@@ -1401,11 +1408,13 @@ UI.addTab({
 
     /* 選擇起終點：GPS／地圖點選／常用地點／已存標記／搜尋 */
     let chI = -1, nomRes = [], items = [];
+    let mkOpen = false, mkCat = '';
     const renderCh = () => {
       if (chI < 0) { chBox.style.display = 'none'; chBox.innerHTML = ''; return; }
       chBox.style.display = '';
       chBox.innerHTML = `<div class="muted" style="margin-bottom:6px">設定「${esc(label(chI))}」</div>
-        <div class="row" style="margin-bottom:6px"><button type="button" data-a="gps">🛰️ 目前 GPS</button><button type="button" data-a="map">📌 地圖點選</button><button type="button" data-a="x">取消</button></div>
+        <div class="row" style="margin-bottom:6px"><button type="button" data-a="gps">🛰️ 目前 GPS</button><button type="button" data-a="map">📌 地圖點選</button><button type="button" data-a="mk" class="${mkOpen ? 'on' : ''}">🏷️ 我的標記</button><button type="button" data-a="x">取消</button></div>
+        ${mkOpen ? `<label style="margin:0 0 6px">標記分類<select id="rMc"><option value="">全部分類</option>${Cats.options(mkCat)}</select></label>` : ''}
         <div class="row" style="flex-wrap:nowrap;margin-bottom:6px"><input id="rQ" type="search" placeholder="搜尋標記／地址／名稱／座標" style="flex:1"><button type="button" class="primary" data-a="q">搜尋</button></div>
         <div class="muted" id="rQst"></div><ul class="items" id="rQl"></ul>`;
       fillList();
@@ -1414,7 +1423,7 @@ UI.addTab({
       const inp = $('#rQ', chBox), ul = $('#rQl', chBox); if (!ul) return;
       const norm = s => String(s || '').replace(/臺/g, '台').toLowerCase(), q = norm(inp.value.trim());
       const favs = Store.state.places.filter(p => !q || norm(p.name).includes(q));
-      const mks = q ? Store.state.markers.filter(m => norm(m.name + ' ' + m.addr).includes(q)).slice(0, 8) : [];
+      const mks = (q || mkOpen) ? Store.state.markers.filter(m => (!mkCat || m.catId === mkCat) && (!q || norm(m.name + ' ' + m.addr).includes(q))).sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hant')).slice(0, mkOpen ? 80 : 8) : [];
       items = [
         ...favs.map(p => ({ ic: '⭐', name: p.name, sub: '常用地點', lat: p.lat, lng: p.lng })),
         ...mks.map(m => ({ ic: Cats.get(m.catId).emoji, name: m.name, sub: m.addr || '已存標記', addr: m.addr || '', named: true, lat: m.lat, lng: m.lng, ref: m.id })),
@@ -1423,7 +1432,7 @@ UI.addTab({
       ul.innerHTML = items.map((x, k) => `<li data-k="${k}"><span class="ic">${esc(x.ic)}</span><div style="min-width:0"><div class="t">${esc(x.name)}</div><div class="muted">${esc(x.sub)}</div></div></li>`).join('')
         || '<li class="muted" style="cursor:default">沒有符合的項目，可按「搜尋」查地址或名稱</li>';
     };
-    const openCh = i => { chI = i; nomRes = []; renderCh(); const q = $('#rQ', chBox); if (q) q.focus(); };
+    const openCh = i => { chI = i; nomRes = []; mkOpen = false; renderCh(); const q = $('#rQ', chBox); if (q) q.focus(); };
     const searchNom = async () => {
       const inp = $('#rQ', chBox), qs = $('#rQst', chBox), v = inp.value.trim(); if (!v) return;
       const ll0 = extractLatLng(v);
@@ -1434,6 +1443,7 @@ UI.addTab({
         nomRes = rs.list;
         const hits = nomRes.filter(r => r.hit).length;
         qs.textContent = nomRes.length ? `找到 ${nomRes.length} 筆${rs.pa.no ? (hits ? `｜✅ 門牌相符 ${hits} 筆` : '｜⚠️ 找不到相同門牌，列出最接近的結果') : ''}（範圍：${scopeLabel(sc)}）` : `在「${scopeLabel(sc)}」內查無資料，可到「設定」放寬查詢範圍，或改用「地圖點選」`;
+        if (!nomRes.length || (rs.pa.no && !hits)) qs.innerHTML = esc(qs.textContent) + gSearchHelp(v);
         fillList();
       } catch (e) { qs.textContent = '❌ 查詢失敗或逾時，請稍後再試'; }
     };
@@ -1443,6 +1453,7 @@ UI.addTab({
       const a = e.target.dataset.a; if (!a) return;
       if (a === 'x') { chI = -1; renderCh(); }
       else if (a === 'q') searchNom();
+      else if (a === 'mk') { mkOpen = !mkOpen; renderCh(); }
       else if (a === 'map') {
         const i = chI; chI = -1; renderCh();
         App.pick = ll => setPoint(i, { lat: ll.lat, lng: ll.lng, name: `地圖選點 ${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}` });
@@ -1454,6 +1465,7 @@ UI.addTab({
       }
     };
     chBox.addEventListener('input', e => { if (e.target.id === 'rQ') fillList(); });
+    chBox.addEventListener('change', e => { if (e.target.id === 'rMc') { mkCat = e.target.value; fillList(); } });
     chBox.addEventListener('keydown', e => { if (e.target.id === 'rQ' && e.key === 'Enter') searchNom(); });
 
     /* 顯示路線 */
@@ -1468,8 +1480,9 @@ UI.addTab({
       sum.innerHTML = `<div class="hrsbox"><div style="font-size:17px"><b>${fmtDist(r.distance)}</b>　約 <b>${fmtDur(sec)}</b></div>
         <div class="muted">${esc(Router.PROFILES[R.profile].label)}｜${fmtHM(dep)} 出發 → 預計 ${fmtHM(eta)} 到達${eta.toDateString() !== dep.toDateString() ? '（隔天）' : ''}</div>
         ${drv ? `<div class="muted">時段：${esc(adj.label)}（係數 ×${adj.factor.toFixed(2)}${mo ? '，機車約為汽車的一半影響' : ''}）｜${mo ? '機車基礎時間' : '路網基礎時間'} ${fmtDur(r.duration)}</div>
-        ${mo ? `<div class="muted">🛵 機車估算：以汽車路網車速為基礎，速度上限 ${Store.state.settings.motoCapKmh || 50} km/h、停等折減 ×${Store.state.settings.motoEff || 0.8}、每個轉彎 +3 秒（可在「設定」依你的實際騎乘調整）。</div>
-        ${r.hwy ? '<div style="color:var(--danger);font-size:12px">⚠️ 路線可能經過國道／快速道路，機車通常不能通行；請在地圖加中途點繞開，或改走平面道路。</div>' : (r.avoidMotorway ? '<div class="muted">已要求路線避開高速公路。</div>' : '<div class="muted">此路線服務無法保證避開國道／快速道路，請留意轉彎指引。</div>')}` : ''}
+        ${mo ? `<div class="muted">🛵 機車估算：以汽車路網車速為基礎，速度上限 ${Store.state.settings.motoCapKmh || 50} km/h、停等折減 ×${Store.state.settings.motoEff || 0.8}、每個轉彎 +3 秒、校正倍率 ×${(Store.state.settings.motoCal || 1).toFixed(2)}。覺得時間不準，直接在下面輸入你實際騎的分鐘數按「校正」，之後所有機車路線都會依此調整（也可在「設定」微調）。</div>
+        ${r.hwy ? '<div style="color:var(--danger);font-size:12px">⚠️ 所有候選路線都疑似經過國道／快速道路，機車不能通行；請在地圖加中途點繞開，或改走平面道路。</div>' : (r.altUsed ? '<div class="muted">✅ 已自動改選不經國道／快速道路的替代路線。</div>' : (r.avoidMotorway ? '<div class="muted">已要求路線避開高速公路，且路線名稱未偵測到國道／快速道路。</div>' : '<div class="muted">此路線服務無法保證避開國道／快速道路，請留意轉彎指引。</div>'))}
+        <div class="row" style="align-items:center;margin-top:4px"><span class="muted">⏱️ 校正：我實際騎這條路要</span><input id="rAct" type="number" min="1" step="1" style="width:70px" placeholder="分鐘"><button type="button" data-a="cal">校正</button></div>` : ''}
         <div class="muted">⚠️ 係數是依經驗推估的時段加權，不是即時或歷史路況；連假、事故、天氣可能與實際有落差。</div>` : '<div class="muted">步行／自行車依一般速度估算，不受平假日影響。</div>'}
         <div class="row" style="margin-top:8px"><button type="button" class="primary" data-a="save">💾 儲存路線</button><button type="button" data-a="redo">🔄 重新規劃</button></div>
         <div class="muted" style="margin-top:8px">📤 開啟或分享給其他地圖 App（Google／Apple 會用自己的演算法重算路線，起終點與中途點會帶過去）</div>
@@ -1556,6 +1569,13 @@ UI.addTab({
     sum.onclick = e => {
       const a = e.target.dataset.a; if (!a) return;
       if (a === 'redo') plan();
+      else if (a === 'cal') {
+        const act = +((sum.querySelector('#rAct') || {}).value), r0 = R.route;
+        if (!(act > 0) || !r0) return toast('請先輸入實際騎乘分鐘數');
+        const adj0 = adjustDuration(r0, departDate(), R.holiday, 0.5).sec, S0 = Store.state.settings;
+        S0.motoCal = Math.min(3, Math.max(0.3, +(((S0.motoCal || 1) * act * 60 / adj0)).toFixed(3))); Store.save();
+        toast(`✅ 已校正：機車時間倍率 ×${S0.motoCal.toFixed(2)}，重新規劃中…`, 3500); plan();
+      }
       else if (a === 'save') saveRoute();
       else if (!R.route || R.pts.some(x => !x)) return;
       else if (a === 'gmap') window.open(gsOk() ? R.gshare : mapLinks(false).g, '_blank', 'noopener');
@@ -1641,7 +1661,7 @@ UI.addTab({
     const r5 = n => Math.round(n * 1e5) / 1e5;
     const saveRoute = () => {
       if (!R.route) return;
-      const p = R.pts, def = `${p[0].name} → ${p[p.length - 1].name}`;
+      const p = R.pts, def = p.map(x => x.name).join(' → ');
       const name = prompt('路線名稱', def); if (name === null) return;
       Store.state.routes.unshift({
         id: uid(), name: name.trim() || def, profile: R.profile,
@@ -1712,6 +1732,10 @@ const PRESETS = [
     q: ['["amenity"="pharmacy"]'], match: t => t.amenity === 'pharmacy' },
   { id: 'toilets', label: '廁所', emoji: '🚻', color: '#475569', cat: 'toilet',
     q: ['["amenity"="toilets"]'], match: t => t.amenity === 'toilets' },
+  { id: 'parking', label: '停車場（汽車）', emoji: '🅿️', color: '#2563eb', cat: 'parking', opt: true,
+    q: ['["amenity"="parking"]["access"!~"^(private|no)$"]', '["amenity"="parking_entrance"]'], match: t => (t.amenity === 'parking' || t.amenity === 'parking_entrance') && !/^(private|no)$/.test(t.access || '') },
+  { id: 'motoparking', label: '機車停車', emoji: '🛵', color: '#0ea5e9', cat: 'motoparking', opt: true,
+    q: ['["amenity"="motorcycle_parking"]', '["amenity"="parking"]["capacity:motorcycle"]', '["amenity"="parking"]["motorcycle"="yes"]'], match: t => t.amenity === 'motorcycle_parking' || (t.amenity === 'parking' && (t['capacity:motorcycle'] || t.motorcycle === 'yes')) },
   { id: 'speedcam', label: '測速照相', emoji: '📸', color: '#e11d48', cat: 'speedcam', opt: true,
     q: ['["highway"="speed_camera"]', '["enforcement"="maxspeed"]'], match: t => t.highway === 'speed_camera' || t.enforcement === 'maxspeed' },
   { id: 'shopee', label: '蝦皮店到店（智取店）', emoji: '📦', color: '#ee4d2d', cat: 'shopee', opt: true,
@@ -1727,6 +1751,15 @@ const PRESETS = [
     q: ['["man_made"="surveillance"]["surveillance"~"^(public|outdoor)$"]', '["man_made"="surveillance"]["surveillance:zone"~"traffic|town|street"]', '["man_made"="surveillance"]["contact:webcam"]'],
     match: t => t.man_made === 'surveillance' }
 ];
+const parkBrief = t => {
+  t = t || {}; const a = [];
+  if (t.fee === 'yes') a.push('💰 收費' + (t.charge ? '：' + t.charge : '')); else if (t.fee === 'no') a.push('🆓 免費');
+  if (t.capacity) a.push('🚗 ' + t.capacity + ' 位'); if (t['capacity:motorcycle']) a.push('🛵 ' + t['capacity:motorcycle'] + ' 位');
+  const ty = { 'multi-storey': '立體停車場', underground: '地下停車場', surface: '平面停車場', rooftop: '屋頂停車', street_side: '路邊停車', lane: '路邊停車' }[t.parking]; if (ty) a.push(ty);
+  if (t['capacity:disabled']) a.push('♿ ' + t['capacity:disabled']);
+  if (t.access && t.access !== 'yes') a.push('限：' + t.access);
+  return a.join('｜');
+};
 const ensurePresetCat = p => {
   const c = Cats.ensure({ id: p.cat, name: p.label, emoji: p.emoji, color: p.color });
   if (p.id === 'pharmacy' && c.name === '藥妝店') c.name = '藥局';   // 舊版曾把「藥局」改名為藥妝店，這裡還原為獨立的藥局
@@ -1799,6 +1832,7 @@ UI.addTab({
         ${r.addr ? `<div class="muted">📮 ${esc(r.addr)}</div>` : ''}
         ${r.p.id === 'cctv' ? '' : (r.hours ? `<div>🕒 ${esc(r.hours)}</div>` : '<div class="muted">🕒 OSM 無營業時間資料</div>')}
         ${r.phone ? `<div class="muted">☎ ${esc(r.phone)}</div>` : ''}
+        ${/parking/.test(r.p.id) ? `<div>${esc(parkBrief(r.tags) || '（OSM 沒有收費／車位數資料）')}</div><div class="muted">即時剩餘車位沒有免費公開來源可直接查，請以現場或停車場 App 為準</div>` : ''}
         ${r.limit ? `<div>🚦 速限 <b>${r.limit}</b> km/h</div>` : ''}
         ${img ? `<div style="margin:6px 0"><img src="${esc(img.url)}" alt="影像快照" loading="lazy" referrerpolicy="no-referrer" style="max-width:100%;border-radius:6px" onerror="this.style.display='none'"></div>` : ''}
         ${cl.length ? `<div class="row" style="margin:6px 0">${cl.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.label)}</a>`).join('　')}</div>` : (r.p.id === 'cctv' ? '<div class="muted">此點在資料來源中沒有影像連結</div>' : '')}
@@ -1849,7 +1883,7 @@ UI.addTab({
         st.textContent += `｜用時 ${((Date.now() - t0) / 1000).toFixed(1)} 秒`;
         if (catSel.value === 'cctv') st.textContent += '｜OSM 的監視器資料很少且多半沒有影像，官方即時影像請用 TDX 金鑰';
         ul.innerHTML = results.slice(0, 100).map((r, i) => `<li data-i="${i}"><span class="ic">${esc(r.p.emoji)}</span><div><div class="t">${esc(r.name)}</div>
-          <div class="muted">${esc(r.p.label)}｜${fmtDist(r.dist)}${r.hours ? '｜🕒 ' + esc(r.hours) : ''}${camLinks(r).length ? '｜📹 有影像連結' : ''}</div></div></li>`).join('');
+          <div class="muted">${esc(r.p.label)}｜${fmtDist(r.dist)}${/parking/.test(r.p.id) && parkBrief(r.tags) ? '｜' + esc(parkBrief(r.tags)) : ''}${r.hours ? '｜🕒 ' + esc(r.hours) : ''}${camLinks(r).length ? '｜📹 有影像連結' : ''}</div></div></li>`).join('');
         if (results.length) { const b = q('#nAll'); b.style.display = ''; b.textContent = `＋ 全部加入我的標記（${results.length}）`; }
         // 不自動縮放／移動地圖：維持查詢前的畫面與縮放比例
       } catch (e) { st.textContent = '❌ 查詢失敗或逾時（Overpass 伺服器忙碌），請稍後再試或縮小半徑／分類。'; }
@@ -1955,6 +1989,11 @@ UI.addTab({
       <div class="hrsbox"><b>⚡ 一鍵匯入（內建來源）</b>
         <div class="muted" style="margin:4px 0 8px">按下後自動取得並進入預覽，可再篩選縣市後才匯入。讀取順序：①你專案內的 data/speedcam.csv（最穩，建議）②政府網站直連 ③公共轉送服務。都失敗時請改用下方「選擇檔案」。</div>
         <div id="iSrc"></div><div class="muted" id="iSrcSt"></div></div>
+      <div class="hrsbox"><b>📸 測速點：從 OpenStreetMap 即時取得（免下載檔案）</b>
+        <div class="muted" style="margin:4px 0 6px">勾選要的縣市（預設臺北市＋新北市），按下取得後進入預覽，確認再匯入。之後需要別的縣市，再勾選按一次即可（重複的點會自動略過）。</div>
+        <div class="row" style="margin-bottom:4px"><button type="button" data-w="def">預設（北北）</button><button type="button" data-w="all">全選</button><button type="button" data-w="none">全不選</button></div>
+        <div id="iOsmC" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:2px 8px"></div>
+        <button type="button" class="primary" id="iOsmGo" style="width:100%;margin-top:8px">⬇️ 取得所選縣市的測速點</button><div class="muted" id="iOsmSt"></div></div>
       <label>選擇檔案（CSV／JSON／GeoJSON／本程式備份檔）<input type="file" id="iFile"></label>
       <label>或從網址載入（對方網站需允許跨來源存取）</label>
       <div class="row" style="margin:-4px 0 8px"><input id="iUrl" placeholder="https://…/stations.csv" style="flex:1"><button id="iLoad">載入</button></div>
@@ -1991,11 +2030,39 @@ UI.addTab({
         const { text, via } = await getText(s.url, s.local);
         srcSt.textContent = `✅ 已取得「${s.name}」${via}`; load(text, s.name + '.csv', s.opts);
       } catch (err) {
-        srcSt.innerHTML = `❌ 自動下載失敗（政府網站不允許瀏覽器直接讀取，這是對方的限制）。<br>👉 <b>一勞永逸</b>：<a href="${esc(s.url)}" target="_blank" rel="noopener">下載檔案</a>後，上傳到你的 GitHub 專案並命名為 <code>data/speedcam.csv</code>（Add file → Upload files，資料夾名 data），之後按這顆按鈕就能直接匯入。<br>或：下載後用下方「選擇檔案」匯入。`;
+        srcSt.innerHTML = `❌ 自動下載失敗（政府網站不允許瀏覽器直接讀取，這是對方的限制）。<br>👉 <b>一勞永逸</b>：<a href="${esc(s.url)}" target="_blank" rel="noopener">下載檔案</a>後，上傳到你的 GitHub 專案並命名為 <code>data/speedcam.csv</code>（或直接用上方「從 OpenStreetMap 即時取得」）（Add file → Upload files，資料夾名 data），之後按這顆按鈕就能直接匯入。<br>或：下載後用下方「選擇檔案」匯入。`;
       }
       b.disabled = false;
     };
     let rows = [], skipped = 0;
+    const OSM_CITIES = ['臺北市', '新北市', '基隆市', '桃園市', '新竹市', '新竹縣', '苗栗縣', '臺中市', '彰化縣', '南投縣', '雲林縣', '嘉義市', '嘉義縣', '臺南市', '高雄市', '屏東縣', '宜蘭縣', '花蓮縣', '臺東縣', '澎湖縣', '金門縣', '連江縣'];
+    const osmBox = $('#iOsmC', el), osmSt = $('#iOsmSt', el);
+    const osmSel = () => { const v = Store.state.settings.camCities; return new Set(Array.isArray(v) && v.length ? v : ['臺北市', '新北市']); };
+    const osmDraw = sel => { osmBox.innerHTML = OSM_CITIES.map(c => `<label style="display:flex;gap:4px;align-items:center;color:var(--fg);margin:0"><input type="checkbox" data-oc="${c}" ${sel.has(c) ? 'checked' : ''} style="width:auto;margin:0"> ${c}</label>`).join(''); };
+    osmDraw(osmSel());
+    const osmSave = () => { Store.state.settings.camCities = [...osmBox.querySelectorAll('input:checked')].map(i => i.dataset.oc); Store.save(); };
+    osmBox.onchange = osmSave;
+    el.querySelectorAll('[data-w]').forEach(b => { b.onclick = () => { osmDraw(b.dataset.w === 'all' ? new Set(OSM_CITIES) : b.dataset.w === 'none' ? new Set() : new Set(['臺北市', '新北市'])); osmSave(); }; });
+    $('#iOsmGo', el).onclick = async () => {
+      const cities = [...osmBox.querySelectorAll('input:checked')].map(i => i.dataset.oc); if (!cities.length) { osmSt.textContent = '請至少勾選一個縣市'; return; }
+      const btn = $('#iOsmGo', el); btn.disabled = true; pv.innerHTML = ''; const got = [], seen = new Set(), failed = [];
+      for (let k = 0; k < cities.length; k++) {
+        const c = cities[k], nm = c.replace('臺', '[臺台]'); osmSt.textContent = `⏳ 取得中 ${k + 1}/${cities.length}：${c}…（大縣市可能要十幾秒）`;
+        const qy = `[out:json][timeout:90];area["boundary"="administrative"]["name"~"^${nm}$"]->.a;(nwr(area.a)["highway"="speed_camera"];nwr(area.a)["enforcement"="maxspeed"];);out center tags;`;
+        try {
+          const els = await Geo.overpass(qy, 100000);
+          els.forEach(e => {
+            const key = e.type + e.id; if (seen.has(key)) return; seen.add(key);
+            const pl = Geo.toPlace(e); if (!pl) return; const t = pl.tags || {};
+            got.push({ name: (t.name && t.name !== '（未命名）' ? t.name : (pl.addr || '測速照相')).slice(0, 80), lat: pl.lat, lng: pl.lng, addr: pl.addr || '', hours: '', note: '來源：OpenStreetMap', catName: '', rating: 0, city: c, region: '', limit: parseInt(t.maxspeed) || 0, dir: t.direction || t['camera:direction'] || '' });
+          });
+        } catch (e) { failed.push(c); }
+      }
+      btn.disabled = false;
+      osmSt.textContent = `取得 ${got.length} 筆${failed.length ? `；${failed.join('、')} 取得失敗（伺服器忙碌，稍後再按一次）` : ''}。注意：OSM 的測速點不一定齊全。`;
+      if (!got.length) { pv.innerHTML = '<p class="muted">所選縣市在 OSM 沒有測速點資料或伺服器暫時無回應。可改用下方「選擇檔案」匯入政府 CSV。</p>'; return; }
+      rows = got; skipped = 0; preview('測速點（OpenStreetMap）', { bn: '測速點（OSM）', sc: true });
+    };
 
     const load = (text, name, opts) => {
       try {
@@ -2057,7 +2124,7 @@ UI.addTab({
       pv.querySelectorAll('[data-f]').forEach(b => { b.onclick = () => { pv.querySelectorAll('#iCities input').forEach(i => { i.checked = b.dataset.f === 'all'; }); upd(); }; });
       const showNew = () => { $('#iNew', pv).style.display = $('#iCat', pv).value === '__new__' ? '' : 'none'; };
       $('#iCat', pv).onchange = showNew;
-      if (hasLimit) {   // 有「速限」欄位：預設歸到「測速照相」分類
+      if (hasLimit || opts.sc) {   // 有「速限」欄位：預設歸到「測速照相」分類
         if (Store.state.categories.some(c => c.id === 'speedcam')) $('#iCat', pv).value = 'speedcam';
         else { $('#iCat', pv).value = '__new__'; $('#iNn', pv).value = '測速照相'; $('#iNe', pv).value = '📸'; }
         showNew();
@@ -2170,7 +2237,8 @@ UI.addTab({
         <label>預設交通方式（開啟路線分頁時使用）<select id="sRp"></select></label>
         <div class="two"><label>機車速度上限（km/h）<input type="number" id="sMc" min="25" max="90" step="5"></label>
         <label>機車停等折減（0.5～1）<input type="number" id="sMe" min="0.5" max="1" step="0.05"></label></div>
-        <div class="muted">機車時間 = 以汽車路網的車速為基礎，取「速度上限」並乘上「停等折減」（紅綠燈、車流），再每個轉彎加 3 秒。實際騎完後覺得估得太快就把折減調小（例如 0.7），太慢就調大。</div></div>
+        <label>機車時間校正倍率（0.3～3；1＝不校正）<input type="number" id="sMk" min="0.3" max="3" step="0.05"></label>
+        <div class="muted">機車時間 = 以汽車路網的車速為基礎，取「速度上限」並乘上「停等折減」（紅綠燈、車流），每個轉彎加 3 秒，最後乘上「校正倍率」。「速度上限」只影響暢通路段，市區時間多半被紅綠燈決定，所以調它效果有限。最準的做法：在「路線」輸入實際騎乘分鐘數按「校正」，會自動算出倍率。</div></div>
       <div class="hrsbox"><b>🌏 查詢範圍限制（用於「查詢」）</b>
         <div class="muted" style="margin:4px 0 8px">先限制國家，再限制區域，避免搜尋結果跑到別的國家。查無資料時會先模糊比對，再詢問是否擴大範圍。區域邊界為粗略範圍。</div>
         <label>國家<select id="sCtry"></select></label>
@@ -2183,12 +2251,12 @@ UI.addTab({
       <label style="display:flex;gap:6px;align-items:center;color:var(--fg)"><input type="checkbox" id="sGeo" style="width:auto;margin:0"> 點擊地圖新增標記時，自動查詢地名（Nominatim）</label>
       <p class="muted">地圖右下角的＋－與滑桿可隨時手動調整縮放。GPS 定位需要 https 或 localhost。</p>`;
     const q = s => $(s, el), S = () => Store.state.settings, save = () => { Store.save(); toast('✓ 已自動儲存', 1200); };
-    const rp = q('#sRp'), mc = q('#sMc'), me = q('#sMe'), mode = q('#sMode'), pl = q('#sPlace'), z = q('#sZ'), zv = q('#sZv'), rr = q('#sR'), geo = q('#sGeo'), lp = q('#sLp');
+    const rp = q('#sRp'), mc = q('#sMc'), me = q('#sMe'), mk = q('#sMk'), mode = q('#sMode'), pl = q('#sPlace'), z = q('#sZ'), zv = q('#sZv'), rr = q('#sR'), geo = q('#sGeo'), lp = q('#sLp');
     const fill = () => {
       pl.innerHTML = '<option value="">— 尚無／未選擇 —</option>' + Store.state.places.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
       pl.value = S().defaultPlaceId || ''; mode.value = S().startMode; z.value = S().defaultZoom; zv.textContent = z.value;
       rp.innerHTML = Object.entries(Router.PROFILES).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join(''); rp.value = Router.PROFILES[S().routeProfile] ? S().routeProfile : 'moto';
-      mc.value = S().motoCapKmh || 50; me.value = S().motoEff || 0.8;
+      mc.value = S().motoCapKmh || 50; me.value = S().motoEff || 0.8; mk.value = S().motoCal || 1;
       rr.value = S().searchRadiusKm; geo.checked = S().autoGeocode !== false; lp.value = (S().longPressMs || 700) / 1000;
     };
     mode.onchange = () => { S().startMode = mode.value; save(); };
@@ -2206,6 +2274,7 @@ UI.addTab({
     q('#sTclr').onclick = () => { Tdx.save('', ''); tI.value = ''; tS.value = ''; tSt.textContent = '已清除'; };
     q('#sTtest').onclick = async () => { Tdx.save(tI.value.trim(), tS.value.trim()); tSt.textContent = '⏳ 測試中…'; try { await Tdx.token(); tSt.textContent = '✅ 登入成功（影像資料是否有，要到「附近 → 路口監視器」查）'; } catch (e) { tSt.textContent = '❌ ' + e.message; } };
     mc.onchange = () => { S().motoCapKmh = Math.min(90, Math.max(25, +mc.value || 50)); save(); fill(); };
+    mk.onchange = () => { S().motoCal = Math.min(3, Math.max(0.3, +mk.value || 1)); save(); fill(); };
     me.onchange = () => { S().motoEff = Math.min(1, Math.max(0.5, +me.value || 0.8)); save(); fill(); };
     const cSel = q('#sCtry'), rSel = q('#sReg');
     const fillScope = () => {
