@@ -156,7 +156,7 @@ const Bus = {
   emit(e, d) { (this.h[e] || []).forEach(f => f(d)); }
 };
 
-const Hooks = { navigateTo: null };   // 階段三實作
+const Hooks = { navigateTo: null, nearbyAt: null };   // 階段三實作
 
 /* ---- 共用：複製、分享、座標彈窗 ---- */
 async function copyText(t) {
@@ -1063,6 +1063,48 @@ async function addrSearch(v, sc, progress) {
   return { list, fuzzy, pa };
 }
 
+/* ---------------- 共用：地點搜尋欄（貼上標記／地址／名稱／座標，可連續查詢）---------------- */
+function mountPlaceFinder(root, o) {
+  root.innerHTML = `<div class="row" style="flex-wrap:nowrap;margin-bottom:6px"><input type="search" data-r="q" placeholder="${esc(o.placeholder || '')}" style="flex:1;min-width:0"><button type="button" class="primary" data-a="go">搜尋</button><button type="button" data-a="clr" title="清除欄位與結果">✕ 清除</button></div><div class="muted" data-r="st"></div><ul class="items" data-r="ul"></ul>`;
+  const inp = root.querySelector('[data-r=q]'), st = root.querySelector('[data-r=st]'), ul = root.querySelector('[data-r=ul]');
+  let items = [], nomRes = [];
+  const norm = x => String(x || '').replace(/臺/g, '台').toLowerCase();
+  const fill = () => {
+    const q = norm(inp.value.trim());
+    const favs = q ? Store.state.places.filter(x => norm(x.name).includes(q)) : [];
+    const mks = q ? Store.state.markers.filter(m => norm(m.name + ' ' + m.addr).includes(q)).slice(0, 8) : [];
+    items = [
+      ...favs.map(x => ({ ic: '⭐', name: x.name, sub: '常用地點', lat: x.lat, lng: x.lng })),
+      ...mks.map(m => ({ ic: Cats.get(m.catId).emoji, name: m.name, sub: m.addr || '已存標記', lat: m.lat, lng: m.lng })),
+      ...nomRes.map(r => ({ ic: '🔎', name: r.full || r.name, sub: (r.hit === true ? '✅ 門牌相符｜' : r.hit === false ? '⚠️ 門牌未確認｜' : '') + (r.numDiff != null && r.hit !== true ? `與查詢相差 ${r.numDiff} 號｜` : '') + (r.full ? llText(r) : r.addr), lat: r.lat, lng: r.lng }))
+    ];
+    ul.innerHTML = items.map((x, k) => `<li data-k="${k}"><span class="ic">${esc(x.ic)}</span><div style="min-width:0"><div class="t">${esc(x.name)}</div><div class="muted">${esc(x.sub)}</div></div></li>`).join('');
+  };
+  const search = async () => {
+    const v = inp.value.trim(); if (!v) return;
+    const ll = extractLatLng(v);
+    if (ll) { st.textContent = ''; o.onPick({ lat: ll.lat, lng: ll.lng, name: `${ll.lat}, ${ll.lng}`, label: '貼上座標' }); return; }
+    if (/goo\.gl|maps\.app/i.test(v)) { st.textContent = '短網址無法解析，請先在瀏覽器開啟，再複製完整網址貼上。'; return; }
+    st.textContent = '⏳ 查詢中…';
+    try {
+      const sc = Store.state.settings.scope, rs = await addrSearch(v, sc, t => { st.textContent = t; });
+      nomRes = rs.list; fill();
+      const hits = nomRes.filter(r => r.hit).length;
+      st.textContent = nomRes.length ? `找到 ${nomRes.length} 筆${rs.pa.no ? (hits ? `｜✅ 門牌相符 ${hits} 筆` : '｜⚠️ 找不到相同門牌，列出最接近的結果') : ''}，點選一筆即可（範圍：${scopeLabel(sc)}）` : `在「${scopeLabel(sc)}」內查無資料，可到「設定」放寬查詢範圍`;
+    } catch (e) { st.textContent = '❌ 查詢失敗或逾時，請稍後再試'; }
+  };
+  const clear = () => { inp.value = ''; nomRes = []; items = []; st.textContent = ''; ul.innerHTML = ''; inp.focus(); };
+  inp.addEventListener('input', () => { nomRes = []; fill(); });
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') search(); });
+  root.addEventListener('click', e => {
+    const b = e.target.closest('button[data-a]');
+    if (b) { if (b.dataset.a === 'go') search(); else if (b.dataset.a === 'clr') clear(); return; }
+    const li = e.target.closest('li[data-k]'); if (!li) return;
+    const x = items[+li.dataset.k]; if (x) o.onPick({ lat: x.lat, lng: x.lng, name: x.name, label: x.name });
+  });
+  return { clear, search };
+}
+
 /* --- 分頁：查詢（原「座標」）：輸入地址或名稱，找地點並新增標記；保留座標新增表單 --- */
 UI.addTab({
   id: 'coord', label: '🔍 查詢',
@@ -1077,7 +1119,7 @@ UI.addTab({
     const draw = () => {
       ul.innerHTML = results.map((r, i) => `<li class="wrap" data-i="${i}"><span class="ic">📍</span><div style="flex:1;min-width:0"><div class="t">${esc(r.full || r.name)}</div>
         <div class="muted">${r.hit === true ? '✅ 門牌相符｜' : r.hit === false ? '⚠️ 門牌未確認｜' : ''}${r.numDiff != null && r.hit !== true ? `與查詢相差 ${r.numDiff} 號｜` : ''}${r.full && r.name && !r.full.includes(r.name) ? esc(r.name) + '｜' : ''}${r.dist != null ? '📏 ' + fmtDist(r.dist) + '｜' : ''}${r.full ? llText(r) : esc(r.addr)}</div></div>
-        <div class="btns"><button type="button" data-a="go">前往</button><button type="button" data-a="cp">📋 複製座標</button><button type="button" data-a="ca">📋 複製地址</button><button type="button" data-a="nav">🧭 導航</button><button type="button" data-a="add">＋ 新增標記</button><button type="button" data-a="fav">⭐ 常用</button></div></li>`).join('');
+        <div class="btns"><button type="button" data-a="go">前往</button><button type="button" data-a="cp">📋 複製座標</button><button type="button" data-a="ca">📋 複製地址</button><button type="button" data-a="nav">🧭 導航</button><button type="button" data-a="near">🔎 附近</button><button type="button" data-a="add">＋ 新增標記</button><button type="button" data-a="fav">⭐ 常用</button></div></li>`).join('');
     };
     const go = i => {
       const r = results[i]; if (!r) return;
@@ -1126,7 +1168,8 @@ UI.addTab({
     ul.onclick = e => {
       const li = e.target.closest('li[data-i]'); if (!li) return;
       const i = +li.dataset.i, r = results[i], a = e.target.dataset.a;
-      if (a === 'cp') copyText(llText(r));
+      if (a === 'near') Hooks.nearbyAt({ lat: r.lat, lng: r.lng }, r.raw ? '座標' : (r.full || r.name));
+      else if (a === 'cp') copyText(llText(r));
       else if (a === 'ca') copyText(r.full || r.addr);
       else if (a === 'add') Form.openNew({ lat: r.lat, lng: r.lng }, { name: r.raw ? '' : r.name, addr: r.raw ? '' : (r.full || r.addr) });
       else if (a === 'nav') Hooks.navigateTo({ lat: r.lat, lng: r.lng, name: r.raw ? r.addr : (r.full || r.name), addr: r.raw ? '' : (r.full || r.addr), named: !r.raw });
@@ -1313,7 +1356,7 @@ UI.addTab({
       <div class="muted" id="rSt"></div>
       <div id="rSum"></div><div id="rRem"></div><div id="rCams"></div><div id="rSteps"></div>
       <h4>已儲存路線</h4><ul class="items" id="rSaved"></ul>`;
-    const R = { profile: Router.PROFILES[Store.state.settings.routeProfile] ? Store.state.settings.routeProfile : 'moto', pts: [null, null], route: null, tok: 0, when: 'now', dt: '', holiday: false, camList: [], metric: null, said: new Set(), remText: '', lastShown: null, short: {}, shareApple: false, shortOk: false };
+    const R = { profile: Router.PROFILES[Store.state.settings.routeProfile] ? Store.state.settings.routeProfile : 'moto', pts: [null, null], route: null, tok: 0, when: 'now', dt: '', holiday: false, camList: [], metric: null, said: new Set(), remText: '', lastShown: null, shareApple: false, gshare: '', gsKey: '' };
     const lineLayer = L.layerGroup().addTo(map), ptLayer = L.layerGroup().addTo(map), camLayer = L.layerGroup().addTo(map);
     const stepsBox = $('#rSteps', el), stepLayer = L.layerGroup().addTo(map), st = $('#rSt', el), sum = $('#rSum', el), camBox = $('#rCams', el), ptsBox = $('#rPts', el), chBox = $('#rCh', el);
     const letter = i => String.fromCharCode(65 + i);
@@ -1432,7 +1475,11 @@ UI.addTab({
         <div class="muted" style="margin-top:8px">📤 開啟或分享給其他地圖 App（Google／Apple 會用自己的演算法重算路線，起終點與中途點會帶過去）</div>
         <label style="margin:6px 0 0">地點傳給地圖 App 的方式<select id="rShareMode"><option value="text" ${Store.state.settings.shareMode !== 'coord' ? 'selected' : ''}>店名／地址（有的話；讓 Google 自己找到那間店）</option><option value="coord" ${Store.state.settings.shareMode === 'coord' ? 'selected' : ''}>座標（精確位置，但 Google 可能標成附近的別間店）</option></select></label>
         <div class="row" style="margin-top:4px"><button type="button" data-a="gmap">🗺️ Google 地圖</button><button type="button" data-a="amap">🍎 Apple 地圖</button><button type="button" data-a="share">📤 分享</button><button type="button" data-a="copy">📋 複製連結</button></div>
-        <div class="row" style="margin-top:6px;align-items:center"><button type="button" data-a="short">🔗 縮短網址</button><label style="display:flex;gap:6px;align-items:center;color:var(--fg);margin:0"><input type="checkbox" id="rShareApple" style="width:auto;margin:0" ${R.shareApple ? 'checked' : ''}> 分享文字附上 Apple 地圖連結</label></div></div>`;
+        <div class="hrsbox" style="margin:8px 0 0"><b>📎 Google 地圖的分享網址</b>
+          <div class="muted" style="margin:2px 0 6px">短網址（maps.app.goo.gl）只有 Google 地圖能產生：按上面「🗺️ Google 地圖」開啟 → 在 Google 地圖按「分享」→「複製連結」→ 回到這裡按「📥 貼上」。綁定後，「🗺️ Google 地圖」「複製連結」「分享」都會改用這個網址。</div>
+          <div class="row" style="flex-wrap:nowrap"><input id="rGs" value="${esc(gsOk() ? R.gshare : '')}" placeholder="https://maps.app.goo.gl/…" style="flex:1;min-width:0"><button type="button" data-a="gpaste">📥 貼上</button><button type="button" data-a="gclr">✕</button></div>
+          <div class="muted">${gsOk() ? '✅ 已綁定這條路線' : (R.gshare ? '路線或交通方式已變更，原網址已失效，請重新貼上' : '')}</div></div>
+        <label style="display:flex;gap:6px;align-items:center;color:var(--fg);margin:8px 0 0"><input type="checkbox" id="rShareApple" style="width:auto;margin:0" ${R.shareApple ? 'checked' : ''}> 分享文字附上 Apple 地圖連結</label></div>`;
       if (R.lastShown !== r) { R.lastShown = r; R.said = new Set(); R.metric = routeMetric(r.geometry); }
       drawCams(r); drawSteps(r); renderRem();
       if (fit) map.fitBounds(L.latLngBounds(r.geometry), { padding: [30, 30] });
@@ -1491,36 +1538,32 @@ UI.addTab({
       const a = 'https://maps.apple.com/?' + (live ? '' : 'saddr=' + place(pt[0]) + '&') + 'daddr=' + [...mid, last].map(place).join('+to:') + '&dirflg=' + { moto: 'd', driving: 'd', cycling: 'b', walking: 'w' }[R.profile];
       return { g, a };
     };
+    /* Google 地圖「分享」產生的短網址（maps.app.goo.gl）只能由 Google 地圖本身產生；這裡讓你貼上並綁定到這條路線 */
+    const gsKeyNow = () => R.profile + '|' + R.pts.map(x => x ? (+x.lat).toFixed(5) + ',' + (+x.lng).toFixed(5) : 'x').join(';');
+    const gsOk = () => !!R.gshare && R.gsKey === gsKeyNow();
+    const GS_RE = /^https?:\/\/(maps\.app\.goo\.gl|goo\.gl\/maps|(www\.)?google\.[a-z.]+\/maps|maps\.google\.[a-z.]+)/i;
+    const setGs = text => {
+      const m = String(text || '').match(/https?:\/\/\S+/), u = m ? m[0].replace(/[)\]】」』。，、]+$/, '') : '';
+      if (!u || !GS_RE.test(u)) { toast('這不像 Google 地圖的分享網址（應為 https://maps.app.goo.gl/… ）', 3500); return false; }
+      R.gshare = u; R.gsKey = gsKeyNow(); toast('✅ 已綁定 Google 分享網址，「複製連結」「分享」會使用它', 3500); rerender(); return true;
+    };
     const shareBlock = () => {
       const pt = R.pts, L2 = mapLinks(true), r = R.route, dep = departDate(), sec = (R.profile === 'driving' || R.profile === 'moto') ? adjustDuration(r, dep, R.holiday, R.profile === 'moto' ? 0.5 : 1).sec : r.duration;
-      const last = pt[pt.length - 1], pin = gLink(last.lat, last.lng), sh = u => R.short[u] || u;
-      return { title: `路線：${pt[0].name} → ${last.name}`, text: `🧭 ${pt[0].name} → ${last.name}\n${Router.PROFILES[R.profile].label}｜${fmtDist(r.distance)}｜約 ${fmtDur(sec)}\nGoogle 地圖：${sh(L2.g)}${R.shareApple ? '\nApple 地圖：' + sh(L2.a) : ''}\n📍 終點精確位置：${sh(pin)}` };
+      const last = pt[pt.length - 1], pin = gLink(last.lat, last.lng);
+      return { title: `路線：${pt[0].name} → ${last.name}`, text: `🧭 ${pt[0].name} → ${last.name}\n${Router.PROFILES[R.profile].label}｜${fmtDist(r.distance)}｜約 ${fmtDur(sec)}\nGoogle 地圖：${gsOk() ? R.gshare : L2.g}${R.shareApple ? '\nApple 地圖：' + L2.a : ''}\n📍 終點精確位置：${pin}` };
     };
-    const shorten = async url => {   // 免費短網址服務；失敗就換下一個
-      for (const mk of [u => `https://is.gd/create.php?format=simple&url=${encodeURIComponent(u)}`, u => `https://tinyurl.com/api-create.php?url=${encodeURIComponent(u)}`]) {
-        try { const r = await fetch(mk(url)); const t = (await r.text()).trim(); if (/^https?:\/\/[^\s]+$/.test(t)) return t; } catch (e) {}
-      }
-      throw new Error('短網址服務連線失敗');
-    };
-    const doShorten = async () => {
-      if (!R.route || R.pts.some(x => !x)) return;
-      if (!R.shortOk && !confirm('縮短網址會把路線連結（含起點、終點座標或名稱）送到 is.gd／tinyurl 這類第三方服務。要繼續嗎？')) return;
-      R.shortOk = true; toast('🔗 產生短網址中…', 4000);
-      const L2 = mapLinks(true), last = R.pts[R.pts.length - 1], urls = [L2.g, gLink(last.lat, last.lng)].concat(R.shareApple ? [L2.a] : []);
-      try { for (const u of urls) if (!R.short[u]) R.short[u] = await shorten(u); toast('✅ 已產生短網址，之後「分享」「複製連結」會使用短網址', 3500); }
-      catch (e) { toast('❌ ' + e.message + '；可改取消勾選 Apple 連結或改用座標方式，連結會短很多', 4500); }
-    };
-    sum.onchange = e => { if (e.target.id === 'rShareApple') { R.shareApple = e.target.checked; return; } if (e.target.id === 'rShareMode') { Store.state.settings.shareMode = e.target.value; Store.save(); toast('✓ 已自動儲存', 1200); } };
+    sum.onchange = e => { if (e.target.id === 'rGs') { if (e.target.value.trim()) setGs(e.target.value); return; } if (e.target.id === 'rShareApple') { R.shareApple = e.target.checked; return; } if (e.target.id === 'rShareMode') { Store.state.settings.shareMode = e.target.value; Store.save(); toast('✓ 已自動儲存', 1200); } };
     sum.onclick = e => {
       const a = e.target.dataset.a; if (!a) return;
       if (a === 'redo') plan();
       else if (a === 'save') saveRoute();
       else if (!R.route || R.pts.some(x => !x)) return;
-      else if (a === 'gmap') window.open(mapLinks(false).g, '_blank', 'noopener');
+      else if (a === 'gmap') window.open(gsOk() ? R.gshare : mapLinks(false).g, '_blank', 'noopener');
       else if (a === 'amap') window.open(mapLinks(false).a, '_blank', 'noopener');
       else if (a === 'share') shareText(shareBlock());
-      else if (a === 'copy') copyText(shareBlock().text);
-      else if (a === 'short') doShorten();
+      else if (a === 'copy') { if (gsOk()) copyText(R.gshare); else { copyText(shareBlock().text); toast('尚未貼上 Google 分享網址，已複製一般連結（較長）。想要短網址：先按「🗺️ Google 地圖」→ 在 Google 地圖按「分享」→「複製連結」→ 回來按「📥 貼上」', 6000); } }
+      else if (a === 'gpaste') { navigator.clipboard.readText().then(setGs).catch(() => toast('無法讀取剪貼簿，請長按下方輸入框貼上', 3500)); }
+      else if (a === 'gclr') { R.gshare = ''; R.gsKey = ''; rerender(); }
     };
     /* 測速提醒：行駛中以 GPS 判斷路線上前方的測速照相，靠近時警示 */
     const Rem = { id: null, wake: null, ctx: null, hide: null };
@@ -1602,7 +1645,7 @@ UI.addTab({
       const name = prompt('路線名稱', def); if (name === null) return;
       Store.state.routes.unshift({
         id: uid(), name: name.trim() || def, profile: R.profile,
-        waypoints: p.map(x => ({ lat: x.lat, lng: x.lng, name: x.name })),
+        waypoints: p.map(x => ({ lat: x.lat, lng: x.lng, name: x.name })), shareUrl: gsOk() ? R.gshare : '',
         geometry: R.route.geometry.map(g => [r5(g[0]), r5(g[1])]),
         distance: R.route.distance, duration: R.route.duration, createdAt: Date.now()
       });
@@ -1618,6 +1661,7 @@ UI.addTab({
       else {
         R.tok++; R.profile = Router.PROFILES[rt.profile] ? rt.profile : 'driving'; markProf();
         R.pts = rt.waypoints.map(w => ({ lat: w.lat, lng: w.lng, name: w.name || '' }));
+        R.gshare = rt.shareUrl || ''; R.gsKey = gsKeyNow();
         R.route = { geometry: rt.geometry, distance: rt.distance, duration: rt.duration, steps: [] };
         chI = -1; renderCh(); drawPts(); st.textContent = ''; showRoute(true);
       }
@@ -1693,14 +1737,12 @@ const ensurePresetCat = p => {
 UI.addTab({
   id: 'near', label: '🔎 附近',
   init(el) {
-    el.innerHTML = `<p class="muted">以某點為中心，向 OpenStreetMap 查詢半徑內的店家／設施，直接標在地圖上。預設以目前 GPS 為中心（藍色按鈕＝目前使用的中心來源）。</p>
+    el.innerHTML = `<p class="muted">以某點為中心，向 OpenStreetMap 查詢半徑內的店家／設施，直接標在地圖上。預設以目前 GPS 為中心；也可貼上／搜尋地址、名稱、座標當中心。<b>請先選擇分類再搜尋</b>（分類越少越快）。</p>
       <div class="row" style="margin-bottom:8px"><button type="button" class="srcbtn" id="nGps">🛰️ 目前 GPS</button><button type="button" class="srcbtn" id="nPick">📍 地圖點選</button></div>
-      <div class="row" style="flex-wrap:nowrap;margin-bottom:8px"><input id="nPaste" placeholder="貼上座標或 Google 地圖網址（例：25.03, 121.56）" style="flex:1"><button type="button" id="nPasteGo">設為中心</button></div>
+      <div id="nFind"></div>
+      <div class="row" style="margin:0 0 8px"><button type="button" id="nCopy">📋 複製座標</button><button type="button" id="nShare">📤 分享</button><button type="button" id="nG">🗺️ Google 地圖</button></div>
       <label>或使用常用地點<select id="nPlace"></select></label>
       <div class="muted" id="nCenter">尚未設定中心點</div>
-      <div class="hrsbox" style="margin-top:8px"><b>📍 目前定位座標</b>
-        <div class="row" style="flex-wrap:nowrap;margin:6px 0"><input id="nMeTxt" readonly placeholder="按「取得」讀取目前 GPS" style="flex:1"><button type="button" id="nMeGet">取得</button></div>
-        <div class="row"><button type="button" id="nMeCopy">📋 複製</button><button type="button" id="nMeShare">📤 分享</button><button type="button" id="nMeG">🗺️ Google 地圖</button></div></div>
       <div class="two" style="margin-top:8px">
         <label>半徑：<b id="nRv"></b> 公里<input type="range" id="nR" min="0.1" max="5" step="0.1"></label>
         <label>分類<select id="nCat"></select></label>
@@ -1710,8 +1752,10 @@ UI.addTab({
     const q = s => $(s, el);
     const R = q('#nR'), catSel = q('#nCat'), st = q('#nSt'), ul = q('#nList'), plSel = q('#nPlace');
     const layer = L.layerGroup().addTo(map), cLayer = L.layerGroup().addTo(map);
-    let center = null, results = [], tried = false;
-    catSel.innerHTML = '<option value="all">全部（不含交通、蝦皮）</option>' + PRESETS.map(p => `<option value="${p.id}">${p.emoji} ${p.label}</option>`).join('');
+    let center = null, centerLabel = '', results = [], tried = false;
+    catSel.innerHTML = '<option value="">— 請先選擇分類 —</option>' + PRESETS.map(p => `<option value="${p.id}">${p.emoji} ${p.label}</option>`).join('') + '<option value="all">全部（最慢，不建議）</option>';
+    { const sv = Store.state.settings.nearCat; catSel.value = (sv && [...catSel.options].some(o => o.value === sv)) ? sv : ''; }
+    catSel.onchange = () => { Store.state.settings.nearCat = catSel.value; Store.save(); if (catSel.value === 'all') st.textContent = '⚠️ 「全部」會一次查所有分類，可能要十幾秒到半分鐘；建議只選一個分類。'; };
     R.value = Store.state.settings.searchRadiusKm; q('#nRv').textContent = R.value;
 
     const drawCenter = () => {
@@ -1721,7 +1765,7 @@ UI.addTab({
     };
     const mark = src => { q('#nGps').classList.toggle('on', src === 'gps'); q('#nPick').classList.toggle('on', src === 'pick'); plSel.classList.toggle('on', src === 'place'); };
     const setCenter = (ll, label, src) => {
-      center = { lat: ll.lat, lng: ll.lng }; mark(src);
+      center = { lat: ll.lat, lng: ll.lng }; centerLabel = label; mark(src);
       q('#nCenter').textContent = `✅ 中心：${label}（${center.lat.toFixed(5)}, ${center.lng.toFixed(5)}）`;
       if (src !== 'place') plSel.value = '';
       drawCenter();
@@ -1730,22 +1774,19 @@ UI.addTab({
       try { const p = await App.getLocation(); setCenter(p, '目前 GPS', 'gps'); if (fly) map.flyTo([p.lat, p.lng], defZoom()); }
       catch (e) { toast(e.message); }
     };
-    const meTxt = q('#nMeTxt');
-    const getMe = async () => { meTxt.value = '📡 定位中…'; try { const p = await App.getLocation(); meTxt.value = llText(p); return p; } catch (e) { meTxt.value = ''; toast(e.message); return null; } };
-    q('#nMeGet').onclick = getMe;
-    q('#nMeCopy').onclick = async () => { const p = App.me && meTxt.value && !meTxt.value.startsWith('📡') ? App.me : await getMe(); if (p) copyText(llText(p)); };
-    q('#nMeShare').onclick = async () => { const p = App.me && meTxt.value && !meTxt.value.startsWith('📡') ? App.me : await getMe(); if (p) shareText({ title: '我的位置', text: `我的位置：${llText(p)}`, url: gLink(p.lat, p.lng) }); };
-    q('#nMeG').onclick = async () => { const p = App.me && meTxt.value && !meTxt.value.startsWith('📡') ? App.me : await getMe(); if (p) window.open(gLink(p.lat, p.lng), '_blank', 'noopener'); };
     R.oninput = () => { q('#nRv').textContent = R.value; drawCenter(); };
     q('#nGps').onclick = () => useGps(true);
     q('#nPick').onclick = () => { App.pick = ll => setCenter(ll, '地圖點選', 'pick'); toast('請在地圖上單擊選擇中心點'); };
-    const doPaste = () => {
-      const v = q('#nPaste').value.trim(); if (!v) return;
-      const ll = extractLatLng(v);
-      if (!ll) return toast(/goo\.gl|maps\.app/i.test(v) ? '短網址無法解析，請先在瀏覽器開啟，再複製完整網址' : '看不懂這個座標，格式例：25.03, 121.56 或 Google 地圖網址', 3500);
-      setCenter(ll, '貼上座標', 'paste'); map.flyTo([ll.lat, ll.lng], defZoom());
+    mountPlaceFinder(q('#nFind'), { placeholder: '貼上標記／地址／名稱／座標（可連續查詢）', onPick: p => { setCenter(p, p.label || p.name, 'search'); map.flyTo([p.lat, p.lng], defZoom()); } });
+    const needCenter = async () => { if (!center) await useGps(false); return center; };
+    q('#nCopy').onclick = async () => { const c = await needCenter(); if (c) copyText(llText(c)); };
+    q('#nShare').onclick = async () => { const c = await needCenter(); if (c) shareText({ title: centerLabel || '位置', text: `${centerLabel || '位置'}：${llText(c)}`, url: gLink(c.lat, c.lng) }); };
+    q('#nG').onclick = async () => { const c = await needCenter(); if (c) window.open(gLink(c.lat, c.lng), '_blank', 'noopener'); };
+    Hooks.nearbyAt = (ll, label) => {   // 供「查詢」結果的「🔎 附近」使用
+      setCenter(ll, label || '查詢結果', 'search'); UI.show('near'); map.flyTo([ll.lat, ll.lng], defZoom());
+      toast(catSel.value ? '已設為中心，按「尋找附近」開始' : '已設為中心，請先選擇分類，再按「尋找附近」', 3500);
+      try { if (!catSel.value) catSel.focus(); } catch (e) {}
     };
-    q('#nPasteGo').onclick = doPaste; q('#nPaste').addEventListener('keydown', e => { if (e.key === 'Enter') doPaste(); });
     plSel.onchange = () => { const p = Store.state.places.find(x => x.id === plSel.value); if (p) { setCenter(p, p.name, 'place'); map.flyTo([p.lat, p.lng], defZoom()); } };
     this.onShow = () => { if (!center && !tried) { tried = true; useGps(false); } };   // 第一次進入「附近」自動使用目前 GPS
 
@@ -1776,7 +1817,9 @@ UI.addTab({
     q('#nAll').onclick = () => addMany(results);
 
     q('#nGo').onclick = async () => {
-      if (!center) return toast('請先設定中心點（目前 GPS、地圖點選或常用地點）');
+      if (!center) return toast('請先設定中心點（目前 GPS、地圖點選、搜尋或常用地點）');
+      if (!catSel.value) { st.textContent = '請先選擇分類，再按「尋找附近」（只查選定的分類，速度會快很多）'; try { catSel.focus(); } catch (e) {} return; }
+      const t0 = Date.now();
       Store.state.settings.searchRadiusKm = +R.value; Store.save();
       const sel = catSel.value === 'all' ? PRESETS.filter(p => !p.transit && !p.opt) : PRESETS.filter(p => p.id === catSel.value);
       const rad = Math.round(R.value * 1000), parts = [];
@@ -1803,6 +1846,7 @@ UI.addTab({
         });
         st.textContent = results.length ? `找到 ${results.length} 個地點${results.length >= 400 ? '（已達上限 400，請縮小半徑）' : ''}（資料來自 OpenStreetMap，可能不完整${catSel.value === 'shopee' ? '；蝦皮店到店在 OSM 的標註很少，查不齊時可改用「匯入」清單' : ''}${catSel.value === 'speedcam' ? '；OSM 的測速照相不一定完整，政府「測速執法設置點」資料更齊，可用「匯入」' : ''}）` : '範圍內沒有找到，試試放大半徑或換分類';
         if (tdxNote) st.textContent += '｜' + tdxNote;
+        st.textContent += `｜用時 ${((Date.now() - t0) / 1000).toFixed(1)} 秒`;
         if (catSel.value === 'cctv') st.textContent += '｜OSM 的監視器資料很少且多半沒有影像，官方即時影像請用 TDX 金鑰';
         ul.innerHTML = results.slice(0, 100).map((r, i) => `<li data-i="${i}"><span class="ic">${esc(r.p.emoji)}</span><div><div class="t">${esc(r.name)}</div>
           <div class="muted">${esc(r.p.label)}｜${fmtDist(r.dist)}${r.hours ? '｜🕒 ' + esc(r.hours) : ''}${camLinks(r).length ? '｜📹 有影像連結' : ''}</div></div></li>`).join('');
